@@ -1,0 +1,29 @@
+{
+  "name": "SMA cross buyer",
+  "version": 1,
+  "universe": ["AAPL", "MSFT", "NVDA"],
+  "cadence": { "kind": "daily_close" },
+  "rules": [
+    {
+      "id": "golden-cross",
+      "when": {
+        "kind": "compare",
+        "left": { "kind": "sma", "n": 20 },
+        "op": "crosses_above",
+        "right": { "kind": "sma", "n": 50 }
+      },
+      "then": {
+        "side": "buy",
+        "size": { "kind": "pct_of_equity", "pct_of_equity": "5.00" },
+        "order_type": "market"
+      }
+    }
+  ],
+  "cage": {
+    "max_position_pct": "10.00",
+    "max_positions": 5,
+    "max_order_notional": "2500.00",
+    "max_daily_drawdown_pct": "3.00",
+    "allowed_session": "regular_hours"
+  }
+}

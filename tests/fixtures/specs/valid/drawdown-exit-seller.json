@@ -1,0 +1,40 @@
+{
+  "name": "Drawdown exit",
+  "version": 3,
+  "universe": ["TSLA"],
+  "cadence": { "kind": "every_n_minutes", "n": 15 },
+  "rules": [
+    {
+      "id": "cut-the-loser",
+      "when": {
+        "kind": "all_of",
+        "of": [
+          {
+            "kind": "compare",
+            "left": { "kind": "position_qty" },
+            "op": ">",
+            "right": { "kind": "number", "value": "0" }
+          },
+          {
+            "kind": "compare",
+            "left": { "kind": "change_pct", "n_bars": 5 },
+            "op": "<=",
+            "right": { "kind": "number", "value": "-4.5" }
+          }
+        ]
+      },
+      "then": {
+        "side": "sell",
+        "size": { "kind": "all" },
+        "order_type": "market"
+      }
+    }
+  ],
+  "cage": {
+    "max_position_pct": "25.00",
+    "max_positions": 1,
+    "max_order_notional": "10000.00",
+    "max_daily_drawdown_pct": "5.00",
+    "allowed_session": "regular_hours"
+  }
+}

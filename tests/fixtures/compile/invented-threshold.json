@@ -1,0 +1,68 @@
+{
+  "name": "invented-threshold",
+  "note": "The model was told a price level and answered with a 200-bar moving average nobody asked for. Everything else traces; the lookback does not.",
+  "text": "Buy 5 shares of XYZ when the price is above 250. At most 2 positions, at most 30% of the account in one of them, no order over $1,000, and stop if the account drops 6% in a day.",
+  "model": "claude-opus-5",
+  "calls": [
+    {
+      "request": {
+        "model": "claude-opus-5",
+        "system": "<SYSTEM_PROMPT>",
+        "tools": [
+          "emit_strategy_spec",
+          "ask_for_missing_details"
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": "Buy 5 shares of XYZ when the price is above 250. At most 2 positions, at most 30% of the account in one of them, no order over $1,000, and stop if the account drops 6% in a day."
+          }
+        ]
+      },
+      "response": {
+        "tool": "emit_strategy_spec",
+        "input": {
+          "name": "XYZ breakout",
+          "version": 1,
+          "universe": [
+            "XYZ"
+          ],
+          "cadence": {
+            "kind": "daily_close"
+          },
+          "rules": [
+            {
+              "id": "above-trend",
+              "when": {
+                "kind": "compare",
+                "left": {
+                  "kind": "price"
+                },
+                "op": ">",
+                "right": {
+                  "kind": "sma",
+                  "n": 200
+                }
+              },
+              "then": {
+                "side": "buy",
+                "size": {
+                  "kind": "shares",
+                  "shares": 5
+                },
+                "order_type": "market"
+              }
+            }
+          ],
+          "cage": {
+            "max_position_pct": "30",
+            "max_positions": 2,
+            "max_order_notional": "1000",
+            "max_daily_drawdown_pct": "6",
+            "allowed_session": "regular_hours"
+          }
+        }
+      }
+    }
+  ]
+}

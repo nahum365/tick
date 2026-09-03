@@ -1,0 +1,1 @@
+"""Persistent box-chat tests."""

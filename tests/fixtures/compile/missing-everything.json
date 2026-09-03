@@ -1,0 +1,35 @@
+{
+  "name": "missing-everything",
+  "note": "The words name no security, no size and no limits, so the model calls the refusal tool instead of inventing a strategy.",
+  "text": "Buy the dip and sell the rip. Keep me safe out there.",
+  "model": "claude-opus-5",
+  "calls": [
+    {
+      "request": {
+        "model": "claude-opus-5",
+        "system": "<SYSTEM_PROMPT>",
+        "tools": [
+          "emit_strategy_spec",
+          "ask_for_missing_details"
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": "Buy the dip and sell the rip. Keep me safe out there."
+          }
+        ]
+      },
+      "response": {
+        "tool": "ask_for_missing_details",
+        "input": {
+          "questions": [
+            "Which symbols should this trade?",
+            "What counts as a dip and what counts as a rip? Give me the numbers you want compared.",
+            "How much should each order be \u2014 in shares, in dollars, or as a percentage of your account?",
+            "What position cap, order cap and daily loss limit do you want?"
+          ]
+        }
+      }
+    }
+  ]
+}

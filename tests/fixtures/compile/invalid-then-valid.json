@@ -1,0 +1,125 @@
+{
+  "name": "invalid-then-valid",
+  "note": "The first attempt emits sma(0), which the spec validators reject. The readable error goes back and the second attempt is correct.",
+  "text": "Buy 10 shares of XYZ when the price crosses above its 50 bar simple moving average. Check once at the close. Keep at most 3 positions, no more than 20% of the account in any one of them, no single order over $5,000, and stop for the day if the account falls 4%.",
+  "model": "claude-opus-5",
+  "calls": [
+    {
+      "request": {
+        "model": "claude-opus-5",
+        "system": "<SYSTEM_PROMPT>",
+        "tools": [
+          "emit_strategy_spec",
+          "ask_for_missing_details"
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": "Buy 10 shares of XYZ when the price crosses above its 50 bar simple moving average. Check once at the close. Keep at most 3 positions, no more than 20% of the account in any one of them, no single order over $5,000, and stop for the day if the account falls 4%."
+          }
+        ]
+      },
+      "response": {
+        "tool": "emit_strategy_spec",
+        "input": {
+          "name": "XYZ 50 bar cross",
+          "version": 1,
+          "universe": [
+            "XYZ"
+          ],
+          "cadence": {
+            "kind": "daily_close"
+          },
+          "rules": [
+            {
+              "id": "cross-up",
+              "when": {
+                "kind": "compare",
+                "left": {
+                  "kind": "price"
+                },
+                "op": "crosses_above",
+                "right": {
+                  "kind": "sma",
+                  "n": 0
+                }
+              },
+              "then": {
+                "side": "buy",
+                "size": {
+                  "kind": "shares",
+                  "shares": 10
+                },
+                "order_type": "market"
+              }
+            }
+          ],
+          "cage": {
+            "max_position_pct": "20",
+            "max_positions": 3,
+            "max_order_notional": "5000",
+            "max_daily_drawdown_pct": "4",
+            "allowed_session": "regular_hours"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "claude-opus-5",
+        "system": "<SYSTEM_PROMPT>",
+        "tools": [
+          "emit_strategy_spec",
+          "ask_for_missing_details"
+        ],
+        "message_count": 3,
+        "last_message_role": "user",
+        "last_message_contains": "not a valid strategy spec"
+      },
+      "response": {
+        "tool": "emit_strategy_spec",
+        "input": {
+          "name": "XYZ 50 bar cross",
+          "version": 1,
+          "universe": [
+            "XYZ"
+          ],
+          "cadence": {
+            "kind": "daily_close"
+          },
+          "rules": [
+            {
+              "id": "cross-up",
+              "when": {
+                "kind": "compare",
+                "left": {
+                  "kind": "price"
+                },
+                "op": "crosses_above",
+                "right": {
+                  "kind": "sma",
+                  "n": 50
+                }
+              },
+              "then": {
+                "side": "buy",
+                "size": {
+                  "kind": "shares",
+                  "shares": 10
+                },
+                "order_type": "market"
+              }
+            }
+          ],
+          "cage": {
+            "max_position_pct": "20",
+            "max_positions": 3,
+            "max_order_notional": "5000",
+            "max_daily_drawdown_pct": "4",
+            "allowed_session": "regular_hours"
+          }
+        }
+      }
+    }
+  ]
+}

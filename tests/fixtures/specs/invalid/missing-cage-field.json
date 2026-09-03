@@ -1,0 +1,22 @@
+{
+  "name": "Cage with a hole",
+  "version": 1,
+  "universe": ["AAPL"],
+  "cadence": { "kind": "daily_close" },
+  "rules": [
+    {
+      "id": "dip",
+      "when": {
+        "kind": "compare",
+        "left": { "kind": "price" },
+        "op": "<",
+        "right": { "kind": "number", "value": "100" }
+      },
+      "then": { "side": "buy", "size": { "kind": "shares", "shares": 1 }, "order_type": "market" }
+    }
+  ],
+  "cage": {
+    "max_position_pct": "10", "max_positions": 1,
+    "max_daily_drawdown_pct": "5", "allowed_session": "regular_hours"
+  }
+}

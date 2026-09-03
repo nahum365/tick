@@ -1,0 +1,35 @@
+{
+  "provider": "codex",
+  "kind": "rule",
+  "model_reported": "gpt-test-rule",
+  "turns": [
+    {"answer": "Use XYZ.", "value": ["XYZ"], "quoted_span": "XYZ"},
+    {"answer": "Run at daily close.", "value": {"kind": "daily_close"}, "quoted_span": "daily close"},
+    {
+      "answer": "Use my price condition and two-share market action.",
+      "value": [
+        {
+          "id": "price-rule",
+          "when": {
+            "kind": "compare",
+            "left": {"kind": "price"},
+            "op": ">",
+            "right": {"kind": "number", "value": "100"}
+          },
+          "then": {
+            "side": "buy",
+            "size": {"kind": "shares", "shares": 2},
+            "order_type": "market"
+          }
+        }
+      ],
+      "quoted_span": "price condition and two-share market action"
+    },
+    {"answer": "Maximum position percentage is twenty.", "value": "20", "quoted_span": "twenty"},
+    {"answer": "Maximum position count is three.", "value": 3, "quoted_span": "three"},
+    {"answer": "Maximum order amount is five thousand.", "value": "5000", "quoted_span": "five thousand"},
+    {"answer": "Maximum daily drawdown percentage is four.", "value": "4", "quoted_span": "four"},
+    {"answer": "Use regular hours.", "value": "regular_hours", "quoted_span": "regular hours"},
+    {"answer": "Use each approval.", "value": "each", "quoted_span": "each"}
+  ]
+}

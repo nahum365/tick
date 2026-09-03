@@ -1,0 +1,68 @@
+{
+  "name": "invented-symbol",
+  "note": "The model added a second security to the universe. The words name one. This is the case the prompt cannot prevent and the code must.",
+  "text": "Sell all of my XYZ when the price falls below 100. At most 1 position, up to 50% of the account in it, no order over $2,000, and stop at a 5% daily loss.",
+  "model": "claude-opus-5",
+  "calls": [
+    {
+      "request": {
+        "model": "claude-opus-5",
+        "system": "<SYSTEM_PROMPT>",
+        "tools": [
+          "emit_strategy_spec",
+          "ask_for_missing_details"
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": "Sell all of my XYZ when the price falls below 100. At most 1 position, up to 50% of the account in it, no order over $2,000, and stop at a 5% daily loss."
+          }
+        ]
+      },
+      "response": {
+        "tool": "emit_strategy_spec",
+        "input": {
+          "name": "Stop out",
+          "version": 1,
+          "universe": [
+            "XYZ",
+            "ABCD"
+          ],
+          "cadence": {
+            "kind": "daily_close"
+          },
+          "rules": [
+            {
+              "id": "stop-out",
+              "when": {
+                "kind": "compare",
+                "left": {
+                  "kind": "price"
+                },
+                "op": "<",
+                "right": {
+                  "kind": "number",
+                  "value": "100"
+                }
+              },
+              "then": {
+                "side": "sell",
+                "size": {
+                  "kind": "all"
+                },
+                "order_type": "market"
+              }
+            }
+          ],
+          "cage": {
+            "max_position_pct": "50",
+            "max_positions": 1,
+            "max_order_notional": "2000",
+            "max_daily_drawdown_pct": "5",
+            "allowed_session": "regular_hours"
+          }
+        }
+      }
+    }
+  ]
+}

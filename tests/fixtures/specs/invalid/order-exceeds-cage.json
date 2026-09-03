@@ -1,0 +1,17 @@
+{
+  "name": "Order bigger than the cage",
+  "version": 1,
+  "universe": ["AAPL"],
+  "cadence": { "kind": "daily_close" },
+  "rules": [
+    {
+      "id": "too_big",
+      "when": { "kind": "compare", "left": { "kind": "price" }, "op": "<", "right": { "kind": "number", "value": "100" } },
+      "then": { "side": "buy", "size": { "kind": "notional", "notional": "5000.00" }, "order_type": "market" }
+    }
+  ],
+  "cage": {
+    "max_position_pct": "10", "max_positions": 1, "max_order_notional": "1000.00",
+    "max_daily_drawdown_pct": "5", "allowed_session": "regular_hours"
+  }
+}

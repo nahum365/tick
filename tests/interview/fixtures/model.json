@@ -1,0 +1,22 @@
+{
+  "provider": "anthropic",
+  "kind": "model",
+  "model_reported": "model-test-reported",
+  "turns": [
+    {"answer": "Use ABCD and WXY.", "value": ["ABCD", "WXY"], "quoted_span": "ABCD and WXY"},
+    {"answer": "Run at daily open.", "value": {"kind": "daily_open"}, "quoted_span": "daily open"},
+    {"answer": "Use anthropic.", "value": "anthropic", "quoted_span": "anthropic"},
+    {"answer": "Use model-custom.", "value": "model-custom", "quoted_span": "model-custom"},
+    {
+      "answer": "Read my stated conditions and emit intents only from them.",
+      "value": "Read my stated conditions and emit intents only from them.",
+      "quoted_span": "Read my stated conditions and emit intents only from them."
+    },
+    {"answer": "Maximum position percentage is thirty.", "value": "30", "quoted_span": "thirty"},
+    {"answer": "Maximum position count is four.", "value": 4, "quoted_span": "four"},
+    {"answer": "Maximum order amount is six thousand.", "value": "6000", "quoted_span": "six thousand"},
+    {"answer": "Maximum daily drawdown percentage is five.", "value": "5", "quoted_span": "five"},
+    {"answer": "Use regular hours.", "value": "regular_hours", "quoted_span": "regular hours"},
+    {"answer": "Use standing approval.", "value": "standing", "quoted_span": "standing"}
+  ]
+}

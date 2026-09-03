@@ -1,0 +1,99 @@
+{
+  "name": "Weekly rotation with a cash floor",
+  "version": 2,
+  "universe": ["MSFT", "AAPL", "BRK.B", "SPY"],
+  "cadence": { "kind": "daily_open" },
+  "rules": [
+    {
+      "id": "buy_the_dip",
+      "when": {
+        "kind": "all_of",
+        "of": [
+          {
+            "kind": "compare",
+            "left": { "kind": "price" },
+            "op": "crosses_below",
+            "right": { "kind": "ema", "n": 21 }
+          },
+          {
+            "kind": "compare",
+            "left": { "kind": "cash" },
+            "op": ">=",
+            "right": { "kind": "number", "value": "1000.00" }
+          },
+          {
+            "kind": "not",
+            "of": {
+              "kind": "compare",
+              "left": { "kind": "day_of_week" },
+              "op": ">=",
+              "right": { "kind": "number", "value": "6" }
+            }
+          }
+        ]
+      },
+      "then": {
+        "side": "buy",
+        "size": { "kind": "notional", "notional": "750.25" },
+        "order_type": "market"
+      }
+    },
+    {
+      "id": "trim_the_winner",
+      "when": {
+        "kind": "any_of",
+        "of": [
+          {
+            "kind": "compare",
+            "left": { "kind": "position_pct_of_equity" },
+            "op": ">",
+            "right": { "kind": "number", "value": "18" }
+          },
+          {
+            "kind": "compare",
+            "left": { "kind": "change_pct", "n_bars": 10 },
+            "op": ">",
+            "right": { "kind": "number", "value": "25" }
+          }
+        ]
+      },
+      "then": {
+        "side": "sell",
+        "size": { "kind": "shares", "shares": 3 },
+        "order_type": "market"
+      }
+    },
+    {
+      "id": "friday-flat",
+      "when": {
+        "kind": "all_of",
+        "of": [
+          {
+            "kind": "compare",
+            "left": { "kind": "day_of_week" },
+            "op": ">=",
+            "right": { "kind": "number", "value": "5" }
+          },
+          {
+            "kind": "compare",
+            "left": { "kind": "position_qty" },
+            "op": ">",
+            "right": { "kind": "number", "value": "0" }
+          }
+        ]
+      },
+      "then": {
+        "side": "sell",
+        "size": { "kind": "all" },
+        "order_type": "market"
+      }
+    }
+  ],
+  "cage": {
+    "max_position_pct": "20.00",
+    "max_positions": 4,
+    "max_order_notional": "1000.00",
+    "max_daily_drawdown_pct": "2.50",
+    "allowed_session": "regular_hours"
+  }
+}
