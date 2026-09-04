@@ -461,11 +461,11 @@ class BrowserBridge:
             )
         with self._lock:
             if self._active is not None and not self._active.closed.is_set():
-                raise BrowserBridgeError(
-                    "BROWSER_SESSION_BUSY",
-                    "this box already has a browser session open. Close it before starting "
-                    "another.",
-                )
+                # One phone drives one box. A session still open here is one the
+                # phone lost (app killed, sheet gone, reinstall); the newer request is
+                # the person's current intent, so the stale session ends on the record
+                # rather than blocking them until it expires.
+                self.close(self._active.session_id, "superseded")
             browser_root = ensure_private_dir(self._home / "browser")
             profile = Path(tempfile.mkdtemp(prefix="profile-", dir=browser_root))
             profile.chmod(0o700)

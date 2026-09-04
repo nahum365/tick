@@ -41,7 +41,7 @@ class FakeBrowser:
     def __init__(self) -> None:
         self.launched: list[tuple[str, Viewport, Path]] = []
         self.terminated: list[int] = []
-        self.rss_values = iter((Decimal("82.5"), Decimal("91.25")))
+        self.rss_values = iter((Decimal("82.5"), Decimal("91.25"), Decimal("70"), Decimal("75")))
 
     def launch(self, url: str, viewport: Viewport, profile: Path) -> int:
         self.launched.append((url, viewport, profile))
@@ -152,13 +152,17 @@ def test_open_stream_input_and_close_leave_only_bounded_pixels_in_memory(tmp_pat
     assert "private value" not in ledger_text
 
 
-def test_a_second_session_and_invalid_events_refuse_with_the_next_action(tmp_path: Path):
-    bridge, *_ = build_bridge(tmp_path)
+def test_a_second_open_supersedes_a_stale_session_on_the_record(tmp_path: Path):
+    bridge, display, browser, *_ = build_bridge(tmp_path)
+    stale = bridge.open("https://login.example.invalid", Viewport(390, 760), "provider_login")
     opened = bridge.open("https://login.example.invalid", Viewport(390, 760), "provider_login")
-    with pytest.raises(BrowserBridgeError) as busy:
-        bridge.open("https://login.example.invalid", Viewport(390, 760), "provider_login")
-    assert busy.value.code == "BROWSER_SESSION_BUSY"
-    assert busy.value.reason.endswith("Close it before starting another.")
+    assert opened["session_id"] != stale["session_id"]
+    assert bridge.close_reason(stale["session_id"]) == "superseded"
+    assert browser.terminated == [92]
+    assert display.stopped == [91]
+    assert bridge._active is not None and bridge._active.session_id == opened["session_id"]
+    events = [row.payload["event"] for row in read(tmp_path / "tick-home/browser/records.jsonl")]
+    assert events == ["browser_session_opened", "browser_session_closed", "browser_session_opened"]
 
     refused = (
         ({"kind": "tap", "x": 390, "y": 0}, "latest frame coordinates"),
