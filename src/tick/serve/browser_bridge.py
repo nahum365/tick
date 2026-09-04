@@ -31,6 +31,7 @@ from tick.engine import Unavailable
 from tick.records import DataSource, Ledger, RecordKind, ensure_private_dir
 
 __all__ = [
+    "BROWSER_CAPTURE_GRACE_SECONDS",
     "BROWSER_FPS",
     "BROWSER_JPEG_QUALITY",
     "BROWSER_LIFETIME_SECONDS",
@@ -48,8 +49,13 @@ __all__ = [
 BROWSER_DISPLAY = ":99"
 BROWSER_FPS = 1
 BROWSER_FRAME_QUEUE_SIZE = 3
-BROWSER_JPEG_QUALITY = 55
+# maim's quality scale is 1 through 10 (its -m flag); -q means quiet, not quality.
+BROWSER_JPEG_QUALITY = 6
 BROWSER_LIFETIME_SECONDS = 10 * 60
+# Xvfb and Chrome start asynchronously; captures may miss until the display is
+# up and the first window is mapped. Misses inside this window are retried;
+# a miss that persists past it closes the session as capture_failed.
+BROWSER_CAPTURE_GRACE_SECONDS = 5
 BROWSER_MAX_TEXT_CHARS = 512
 BROWSER_SESSION_LIMIT = 1
 BROWSER_CLOSE_GRACE_SECONDS = 5
@@ -293,15 +299,14 @@ class _Capture:
         self.argv: list[list[str]] = []
 
     def capture(self) -> bytes:
+        # No output path: maim writes to stdout. A stray positional argument
+        # (as a misread "-q <n>" once produced) silently becomes a filename.
         argv = [
             self._binary,
             "-u",
             "--format=jpg",
             "-m",
-            "6",
-            "-q",
             str(BROWSER_JPEG_QUALITY),
-            "/dev/stdout",
         ]
         self.argv.append(argv)
         environment = dict(os.environ)
@@ -631,16 +636,24 @@ class BrowserBridge:
 
     def _capture_loop(self, session: _Session) -> None:
         interval = Decimal(1) / Decimal(BROWSER_FPS)
+        first_miss: Decimal | None = None
         while not session.closed.is_set():
-            age = self._monotonic() - session.started_monotonic
+            now = self._monotonic()
+            age = now - session.started_monotonic
             if age >= BROWSER_LIFETIME_SECONDS:
                 self.close(session.session_id, "expired")
                 return
             try:
                 frame = self._capture.capture()
             except Exception:  # noqa: BLE001 - a capture failure closes without leaking details
-                self.close(session.session_id, "capture_failed")
-                return
+                if first_miss is None:
+                    first_miss = now
+                if now - first_miss >= BROWSER_CAPTURE_GRACE_SECONDS:
+                    self.close(session.session_id, "capture_failed")
+                    return
+                self._sleeper(interval)
+                continue
+            first_miss = None
             item = (int(self._monotonic() * Decimal(1000)), frame)
             try:
                 session.frames.put_nowait(item)

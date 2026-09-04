@@ -12,6 +12,7 @@ import pytest
 from tick.records import read
 from tick.serve import browser_bridge as module
 from tick.serve.browser_bridge import (
+    BROWSER_CAPTURE_GRACE_SECONDS,
     BROWSER_FRAME_QUEUE_SIZE,
     BROWSER_JPEG_QUALITY,
     BROWSER_LIFETIME_SECONDS,
@@ -187,6 +188,60 @@ def test_lifetime_expires_and_kills_both_processes(tmp_path: Path):
     assert display.stopped == [91]
 
 
+class FlakyCapture(FakeCapture):
+    """Fails for the first `misses` calls, as maim does before Xvfb is up."""
+
+    def __init__(self, misses: int) -> None:
+        super().__init__()
+        self.misses = misses
+
+    def capture(self) -> bytes:
+        self.calls += 1
+        if self.calls <= self.misses:
+            raise BrowserBridgeError("BROWSER_CAPTURE_FAILED", "display not ready")
+        return super().capture()
+
+
+def test_capture_misses_inside_the_startup_grace_are_retried(tmp_path: Path):
+    clock = {"t": Decimal(0)}
+
+    def monotonic() -> Decimal:
+        return clock["t"]
+
+    def sleeper(seconds: Decimal) -> None:
+        clock["t"] += seconds
+
+    bridge, _, _, _, _ = build_bridge(tmp_path, monotonic=monotonic, sleeper=sleeper)
+    flaky = FlakyCapture(misses=2)
+    bridge._capture = flaky
+    opened = bridge.open("https://login.example.invalid", Viewport(390, 760), "broker_connect")
+    _, jpeg, _ = next(bridge.frames(opened["session_id"]))
+    assert jpeg == b"\xff\xd8fixture-jpeg\xff\xd9"
+    assert flaky.calls >= 3  # two misses, then the frame (the producer keeps running)
+    assert bridge._active is not None and not bridge._active.closed.is_set()
+    bridge.close(opened["session_id"], "test_finished")
+
+
+def test_capture_misses_past_the_grace_close_the_session(tmp_path: Path):
+    clock = {"t": Decimal(0)}
+
+    def monotonic() -> Decimal:
+        return clock["t"]
+
+    def sleeper(seconds: Decimal) -> None:
+        clock["t"] += seconds
+
+    bridge, display, browser, _, _ = build_bridge(tmp_path, monotonic=monotonic, sleeper=sleeper)
+    bridge._capture = FlakyCapture(misses=10_000)
+    opened = bridge.open("https://login.example.invalid", Viewport(390, 760), "broker_connect")
+    assert list(bridge.frames(opened["session_id"])) == []
+    assert bridge.close_reason(opened["session_id"]) == "capture_failed"
+    assert clock["t"] >= BROWSER_CAPTURE_GRACE_SECONDS
+    assert clock["t"] < BROWSER_CAPTURE_GRACE_SECONDS + 2
+    assert browser.terminated == [92]
+    assert display.stopped == [91]
+
+
 class FakeProcess:
     def __init__(self, pid: int) -> None:
         self.pid = pid
@@ -244,9 +299,10 @@ def test_real_ports_build_only_the_reviewed_commands(monkeypatch, tmp_path: Path
     assert f"--user-agent={expected_user_agent}" in chrome
     assert "--no-sandbox" in chrome
     assert not any("remote-debugging" in value for value in chrome)
-    assert capture.argv == [
-        ["maim", "-u", "--format=jpg", "-m", "6", "-q", str(BROWSER_JPEG_QUALITY), "/dev/stdout"]
-    ]
+    # maim: -m is quality (1-10) and -q is quiet; no output path means stdout.
+    assert 1 <= BROWSER_JPEG_QUALITY <= 10
+    assert capture.argv == [["maim", "-u", "--format=jpg", "-m", str(BROWSER_JPEG_QUALITY)]]
+    assert "-q" not in capture.argv[0]
     assert input_port.argv == [
         ["xdotool", "mousemove", "1", "2", "click", "1"],
         ["xdotool", "mousemove", "3", "4"],
