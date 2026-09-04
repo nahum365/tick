@@ -172,6 +172,9 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/v1/provider/codex/login":
             self._require_empty_body()
             return handlers.provider_login_start(context)
+        if method == "POST" and path == "/v1/provider/codex/install":
+            self._require_empty_body()
+            return handlers.provider_codex_install(context)
         if method == "POST" and path == "/v1/broker/connect":
             return handlers.broker_connect_start(context, self._body())
         if method == "GET" and path == "/v1/agents":

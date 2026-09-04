@@ -186,7 +186,12 @@ ALLOWED_URL_HOSTS = frozenset({"agent.robinhood.com", "127.0.0.1", "{LOOPBACK_HO
 
 # Recovery is the one named module allowed to read the droplet's link-local
 # metadata service. It cannot route off-box and receives only instance tags.
-MODULE_URL_HOSTS = {"serve/recovery.py": frozenset({"169.254.169.254"})}
+MODULE_URL_HOSTS = {
+    "serve/recovery.py": frozenset({"169.254.169.254"}),
+    # The pinned Codex CLI release is fetched from the CLI's own GitHub releases,
+    # SHA-256 verified before anything is written; no Tick host is involved.
+    "serve/codex_install.py": frozenset({"github.com"}),
+}
 
 _URL_HOST = re.compile(r"https?://([^/\s'\"<>)\\]*)")
 

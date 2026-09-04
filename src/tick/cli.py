@@ -294,6 +294,21 @@ pair_app = typer.Typer(
     help="Create or rotate the private credential an app uses to reach this box.",
     no_args_is_help=True,
 )
+
+
+@app.callback()
+def _prepend_home_bin() -> None:
+    """Make `TICK_HOME/bin` (where `tick provider install codex` places the CLI) visible.
+
+    Every `shutil.which("codex")` in the runtime then finds a box-installed Codex,
+    including under systemd, whose PATH omits the user's own bin directories.
+    """
+    home_bin = _home() / "bin"
+    current = os.environ.get("PATH", "")
+    if str(home_bin) not in current.split(os.pathsep):
+        os.environ["PATH"] = f"{home_bin}{os.pathsep}{current}" if current else str(home_bin)
+
+
 app.add_typer(provider_app, name="provider")
 app.add_typer(pair_app, name="pair")
 app.add_typer(agent_app, name="agent")
@@ -1653,6 +1668,22 @@ def provider_list() -> None:
         typer.echo(f"{info.provider.value:<10} {info.shape.value:<9} {state}")
         typer.echo(f"{'':<10} via {info.documented_path}")
         typer.echo(f"{'':<10} needs: {info.requires}")
+
+
+@provider_app.command("install")
+def provider_install(
+    provider: Annotated[Provider, typer.Argument(help="Only codex can be installed by Tick")],
+) -> None:
+    """Install the pinned Codex CLI release under TICK_HOME/bin (Linux x86_64 boxes)."""
+    from tick.serve.codex_install import CodexInstallError, default_fetch, install_codex
+
+    if provider is not Provider.CODEX:
+        _fail(f"{provider.value} has nothing to install: set its API key on the box instead.")
+    try:
+        result = install_codex(_home(), fetch=default_fetch)
+    except CodexInstallError as error:
+        _fail(f"{error.code}: {error.reason}")
+    typer.echo(f"{result['code']}: {result['path']} ({result['release']})")
 
 
 @provider_app.command("check")

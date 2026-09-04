@@ -82,6 +82,7 @@ from tick.runtime import (
 )
 from tick.spec import SpecError
 
+from .codex_install import default_fetch, install_codex
 from .pairing import rotate_secret
 from .recovery import DigitalOceanMetadata, MetadataPort, recovery_tag
 
@@ -213,6 +214,7 @@ class ServeContext:
     ]
     provider_login_start: Callable[[], Mapping[str, str]]
     provider_login_status: Callable[[str], Mapping[str, str]]
+    codex_install: Callable[[], Mapping[str, str]]
     broker_connect_start: Callable[[str | None], Mapping[str, Any]]
     broker_connect_complete: Callable[[str, str], Mapping[str, Any]]
     broker_connect_status: Callable[[str], Mapping[str, Any]]
@@ -357,6 +359,7 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         chat_adapter=run_chat,
         provider_login_start=start_login,
         provider_login_status=login_status,
+        codex_install=lambda: install_codex(home, fetch=default_fetch),
         broker_connect_start=start_connect,
         broker_connect_complete=complete_connect,
         broker_connect_status=connect_status,
@@ -592,6 +595,18 @@ def provider_login_start(context: ServeContext) -> tuple[int, dict[str, Any]]:
         raise APIError(409, exc.code.lower(), exc.reason) from exc
     _record_api_mutation(context, "provider", "codex_device_login_started")
     return 202, result
+
+
+def provider_codex_install(context: ServeContext) -> tuple[int, dict[str, Any]]:
+    """Install the pinned Codex CLI on the box; the login flow itself is unchanged."""
+    from .codex_install import CodexInstallError
+
+    try:
+        result = dict(context.codex_install())
+    except CodexInstallError as exc:
+        raise APIError(409, exc.code.lower(), exc.reason) from exc
+    _record_api_mutation(context, "provider", "codex_installed")
+    return 200, result
 
 
 def provider_login_status(context: ServeContext, login_id: str) -> dict[str, Any]:

@@ -108,6 +108,13 @@ def server_box(box_home: Path):
             "expires_at": "2026-09-03T12:15:00Z",
         },
         provider_login_status=lambda login_id: {"login_id": login_id, "state": "pending"},
+        codex_install=lambda: {
+            "code": "CODEX_INSTALLED",
+            "path": "/fixture/bin/codex",
+            "release": "rust-v0.0.0",
+            "sha256": "f" * 64,
+            "reason": "fixture installed",
+        },
         broker_connect_start=lambda server_url: {
             "authorization_url": "https://login.example.invalid/authorize?state=test",
             "connect_id": "connect-1",
