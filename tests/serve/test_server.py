@@ -1,9 +1,28 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from http.client import HTTPConnection
 from urllib.parse import quote
 
+from tick.broker import (
+    Category,
+    DiscoveredTool,
+    ProfileState,
+    ProfileTool,
+    build_profile,
+    contract_for,
+    inventory_hash,
+    mapping_hash,
+    save_profile,
+)
+from tick.broker.profile import (
+    CANONICALIZER_VERSION,
+    CATEGORIZER_VERSION,
+    CATEGORY_REGISTRY_VERSION,
+    PROFILE_FORMAT_VERSION,
+    ProofResult,
+)
 from tick.records import read
 from tick.runtime import (
     ApprovalMode,
@@ -60,6 +79,79 @@ def test_status_has_the_app_join_shape(server_box, box_agent):
     assert payload["broker"]["profile_state"] == "none"
     assert payload["broker"]["tools_confirmed"] == 0
     assert payload["broker"]["tools_proved"] == 0
+    assert payload["broker"]["tools_awaiting_proof"] == 0
+
+
+def test_status_counts_only_finalized_provable_tools_awaiting_proof(server_box):
+    server, secret, *_ = server_box
+    at = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+
+    def finalized(name: str, category: Category, *, proved: bool) -> ProfileTool:
+        contract = contract_for(
+            DiscoveredTool(
+                name=name,
+                title=None,
+                description="A fixture operation.",
+                input_schema={"type": "object", "properties": {}},
+                output_schema=None,
+                annotations=None,
+                execution=None,
+            )
+        )
+        proof = ProofResult(
+            success=True,
+            resolved=(),
+            unresolved={},
+            detail="the fixture tool proved",
+        )
+        digest = mapping_hash(category, {}, {})
+        return ProfileTool(
+            category=category,
+            contract=contract,
+            arguments={},
+            result={},
+            confirmed_contract_hash=contract.contract_hash,
+            mapping_hash=digest,
+            confirmed_at=at,
+            confirmed_by="terminal",
+            categorizer_version=CATEGORIZER_VERSION,
+            proved_contract_hash=contract.contract_hash if proved else None,
+            proved_mapping_hash=digest if proved else None,
+            proved_at=at if proved else None,
+            proof=proof if proved else None,
+        )
+
+    tools = {
+        tool.contract.name: tool
+        for tool in (
+            finalized("read_fixture", Category.READ_QUOTE, proved=True),
+            finalized("review_fixture", Category.ORDER_PREFLIGHT, proved=False),
+            finalized("place_fixture", Category.ORDER_PLACE, proved=False),
+        )
+    }
+    save_profile(
+        server.context.home,
+        build_profile(
+            server="https://broker.example.invalid/mcp",
+            account_id="account-fixture",
+            tools=tools,
+            inventory_hash=inventory_hash(tuple(tool.contract for tool in tools.values())),
+            data_class="display_only",
+            sanction="community",
+            profile_format_version=PROFILE_FORMAT_VERSION,
+            canonicalizer_version=CANONICALIZER_VERSION,
+            category_registry_version=CATEGORY_REGISTRY_VERSION,
+            state=ProfileState.CONFIRMED,
+            observed_inventory_hash=None,
+            drift=(),
+        ),
+    )
+
+    status, payload = request(server, "GET", "/v1/status", secret=secret)
+    assert status == 200
+    assert payload["broker"]["tools_confirmed"] == 3
+    assert payload["broker"]["tools_proved"] == 1
+    assert payload["broker"]["tools_awaiting_proof"] == 1
 
 
 def test_new_paper_run_exposes_reboot_demotion(server_box, box_agent, monkeypatch):
