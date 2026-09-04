@@ -18,6 +18,7 @@ from tick.auth import (
     ROBINHOOD_SCOPE,
     FileTokenStorage,
     LoopbackAuthorization,
+    RedirectBoundStorage,
     build_oauth_provider,
     client_metadata,
 )
@@ -61,7 +62,8 @@ def test_the_provider_is_built_over_the_local_token_store(home: Path):
         )
 
         assert isinstance(provider, OAuthClientProvider)
-        assert provider.context.storage is storage
+        assert isinstance(provider.context.storage, RedirectBoundStorage)
+        assert provider.context.storage.storage is storage
         assert [str(uri) for uri in provider.context.client_metadata.redirect_uris or []] == [
             loopback.redirect_uri
         ]
@@ -75,3 +77,30 @@ def test_building_a_provider_contacts_nothing(home: Path):
 
     assert not storage.connected()
     assert list(home.rglob("*")) == [] or not storage.token_path.exists()
+
+
+def test_a_client_registered_for_another_redirect_reads_as_absent(home: Path):
+    """Live failure 2026-09-04: client.json held port 40511 from the first run; every
+    later run used a fresh port, authorized, then failed the code exchange."""
+    import asyncio
+
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    storage = FileTokenStorage(home)
+    stale = OAuthClientInformationFull(
+        client_id="stale-client",
+        redirect_uris=["http://127.0.0.1:40511/tick/callback"],
+        token_endpoint_auth_method="none",
+    )
+    asyncio.run(storage.set_client_info(stale))
+    with a_loopback() as loopback:
+        bound = RedirectBoundStorage(storage, redirect_uri=loopback.redirect_uri)
+        assert asyncio.run(bound.get_client_info()) is None
+        fresh = OAuthClientInformationFull(
+            client_id="fresh-client",
+            redirect_uris=[loopback.redirect_uri],
+            token_endpoint_auth_method="none",
+        )
+        asyncio.run(bound.set_client_info(fresh))
+        assert asyncio.run(bound.get_client_info()).client_id == "fresh-client"
+    assert asyncio.run(storage.get_client_info()).client_id == "fresh-client"

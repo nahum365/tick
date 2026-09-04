@@ -22,11 +22,12 @@ so a test can point the whole ceremony at a local mock without monkeypatching.
 from __future__ import annotations
 
 from mcp.client.auth import OAuthClientProvider, TokenStorage
-from mcp.shared.auth import OAuthClientMetadata
+from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
 from .loopback import LoopbackAuthorization
 
 __all__ = [
+    "RedirectBoundStorage",
     "ROBINHOOD_MCP_URL",
     "ROBINHOOD_SCOPE",
     "TICK_CLIENT_NAME",
@@ -80,7 +81,42 @@ def build_oauth_provider(
     return OAuthClientProvider(
         server_url,
         client_metadata=client_metadata(loopback.redirect_uri),
-        storage=storage,
+        storage=RedirectBoundStorage(storage, redirect_uri=loopback.redirect_uri),
         redirect_handler=loopback.redirect_handler,
         callback_handler=loopback.callback_handler,
     )
+
+
+class RedirectBoundStorage:
+    """The injected store, with the registered client bound to this run's redirect.
+
+    A dynamically registered client carries the exact redirect URI it was
+    registered with. The loopback listener takes a fresh port each run, so a
+    client registered on an earlier port would authorize and then fail the code
+    exchange with a redirect mismatch the person cannot see. When the stored
+    client was registered for a different redirect, it reads as absent and the
+    provider registers again. Tokens are untouched: they pass straight through
+    to the one store, which stays the only place credentials land.
+    """
+
+    def __init__(self, storage: TokenStorage, *, redirect_uri: str) -> None:
+        self.storage = storage
+        self._redirect_uri = redirect_uri
+
+    async def get_tokens(self) -> OAuthToken | None:
+        return await self.storage.get_tokens()
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        await self.storage.set_tokens(tokens)
+
+    async def get_client_info(self) -> OAuthClientInformationFull | None:
+        info = await self.storage.get_client_info()
+        if info is None:
+            return None
+        registered = [str(uri) for uri in info.redirect_uris or []]
+        if self._redirect_uri not in registered:
+            return None
+        return info
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        await self.storage.set_client_info(client_info)
