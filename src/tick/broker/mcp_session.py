@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from types import TracebackType
 from typing import Any
@@ -49,12 +49,59 @@ from .toolmap import DiscoveredTool
 __all__ = [
     "MCPSession",
     "SessionOpener",
+    "host_guard",
     "payload_of",
+    "same_site",
     "streamable_http_session",
 ]
 
 #: A factory for one MCP session. Called at most once per `MCPSession`.
 SessionOpener = Callable[[], AbstractAsyncContextManager[ClientSession]]
+
+
+def same_site(host: str | None, pinned_host: str) -> bool:
+    """True when `host` is the pinned host or another host of its registrable domain.
+
+    The MCP endpoint (agent.robinhood.com) and the OAuth authorization server
+    that issues its tokens (api.robinhood.com) are different hosts of one
+    operator. Credentials may travel to either; a host outside that domain is
+    refused whether it arrives by redirect or by a direct request.
+    """
+    if not host:
+        return False
+    if host == pinned_host:
+        return True
+    labels = pinned_host.split(".")
+    if len(labels) < 2:
+        return False
+    return host.endswith("." + ".".join(labels[-2:]))
+
+
+def host_guard(pinned_host: str) -> Callable[[httpx.Response], Awaitable[None]]:
+    """An httpx response hook that refuses hosts outside the pinned site.
+
+    Every response the authorised client receives passes through here: the MCP
+    handshake, token requests, and any redirect target named in Location.
+    """
+
+    async def enforce(response: httpx.Response) -> None:
+        observed = response.url.host
+        location = response.headers.get("location")
+        redirected = response.url.join(location).host if location is not None else None
+        if not same_site(observed, pinned_host):
+            raise BrokerUnavailable(
+                f"the broker session reached {observed}, outside pinned site {pinned_host}. "
+                "The session is refused before anything is sent there; connect to the "
+                "intended host explicitly."
+            )
+        if redirected is not None and not same_site(redirected, pinned_host):
+            raise BrokerUnavailable(
+                f"the broker redirected from {observed} to {redirected}, outside pinned site "
+                f"{pinned_host}. The session is refused before following that redirect; "
+                "connect to the intended host explicitly."
+            )
+
+    return enforce
 
 
 def streamable_http_session(url: str, auth: OAuthClientProvider) -> SessionOpener:
@@ -69,20 +116,7 @@ def streamable_http_session(url: str, auth: OAuthClientProvider) -> SessionOpene
     @asynccontextmanager
     async def opener() -> AsyncIterator[ClientSession]:
         async with create_mcp_http_client(auth=auth) as client:
-            pinned_host = httpx.URL(url).host
-
-            async def enforce_redirect_host(response: httpx.Response) -> None:
-                observed = response.url.host
-                location = response.headers.get("location")
-                redirected = response.url.join(location).host if location is not None else observed
-                if observed != pinned_host or redirected != pinned_host:
-                    raise BrokerUnavailable(
-                        f"the broker redirected from pinned host {pinned_host} to "
-                        f"{redirected}. The session is refused before following that "
-                        "redirect; connect to the intended host explicitly."
-                    )
-
-            client.event_hooks["response"].append(enforce_redirect_host)
+            client.event_hooks["response"].append(host_guard(httpx.URL(url).host))
             async with streamable_http_client(url, http_client=client) as (read, write):
                 async with ClientSession(read, write) as session:
                     yield session

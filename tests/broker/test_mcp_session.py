@@ -197,3 +197,39 @@ def test_describe_failure_names_the_leaf_exceptions_not_the_group():
     outer = ExceptionGroup("unhandled errors in a TaskGroup", [inner, TimeoutError()])
     assert describe_failure(outer) == "ValueError: token endpoint said 400; TimeoutError"
     assert describe_failure(RuntimeError("plain")) == "RuntimeError: plain"
+
+
+def test_the_host_guard_admits_the_operators_other_hosts_and_refuses_strangers():
+    """Live failure 2026-09-04: the token exchange goes to api.robinhood.com while the
+    MCP endpoint is agent.robinhood.com; the old pin refused Robinhood's own server."""
+    import asyncio
+
+    import httpx
+
+    from tick.broker.errors import BrokerUnavailable
+    from tick.broker.mcp_session import host_guard, same_site
+
+    assert same_site("agent.robinhood.com", "agent.robinhood.com")
+    assert same_site("api.robinhood.com", "agent.robinhood.com")
+    assert not same_site("robinhood.com.evil.example", "agent.robinhood.com")
+    assert not same_site("evil.example", "agent.robinhood.com")
+    assert not same_site(None, "agent.robinhood.com")
+
+    guard = host_guard("agent.robinhood.com")
+
+    def response(url: str, location: str | None = None) -> httpx.Response:
+        headers = {"location": location} if location else {}
+        return httpx.Response(
+            302 if location else 200, headers=headers, request=httpx.Request("POST", url)
+        )
+
+    asyncio.run(guard(response("https://api.robinhood.com/oauth2/token")))
+    asyncio.run(
+        guard(response("https://agent.robinhood.com/mcp/trading", "https://api.robinhood.com/x"))
+    )
+    with pytest.raises(BrokerUnavailable) as direct:
+        asyncio.run(guard(response("https://evil.example/token")))
+    assert "outside pinned site agent.robinhood.com" in str(direct.value)
+    with pytest.raises(BrokerUnavailable) as redirect:
+        asyncio.run(guard(response("https://agent.robinhood.com/mcp", "https://evil.example/")))
+    assert "redirected from agent.robinhood.com to evil.example" in str(redirect.value)
