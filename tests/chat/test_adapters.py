@@ -16,7 +16,11 @@ class Completed:
             json.dumps(
                 {
                     "type": "item.completed",
-                    "item": {"type": "tool_result", "name": "status", "result": {"ok": True}},
+                    "item": {
+                        "type": "tool_result",
+                        "name": "status",
+                        "result": {"ok": True, "evidence": ["checked"]},
+                    },
                 }
             ),
         )
@@ -37,7 +41,7 @@ def test_codex_chat_argv_ignores_user_servers_and_registers_only_tick(tmp_path):
         timeout_seconds=20,
     )
 
-    chunks = client.turn((), "structural frame")
+    chunks = client.turn((), "structural frame", setup_session_id=None)
 
     argv = seen[0][0]
     assert "--ignore-user-config" in argv
@@ -48,7 +52,12 @@ def test_codex_chat_argv_ignores_user_servers_and_registers_only_tick(tmp_path):
     assert argv[argv.index("-s") + 1] == "read-only"
     assert chunks == (
         {"kind": "text", "text": "hi"},
-        {"kind": "tool_result", "name": "status", "result": {"ok": True}},
+        {
+            "kind": "tool_result",
+            "name": "status",
+            "result": {"ok": True, "evidence": ["checked"]},
+            "evidence": ["checked"],
+        },
         {"kind": "done", "model": "provider-model"},
     )
 
@@ -77,7 +86,11 @@ def test_anthropic_chat_runs_a_bounded_in_process_tool_loop():
             transcript=(),
             frame="structural frame",
             tools=(),
-            call_tool=lambda name, arguments: {"name": name, "arguments": arguments},
+            call_tool=lambda name, arguments: {
+                "name": name,
+                "arguments": arguments,
+                "evidence": ["checked"],
+            },
         )
     )
 
@@ -87,3 +100,4 @@ def test_anthropic_chat_runs_a_bounded_in_process_tool_loop():
         "text",
         "done",
     ]
+    assert chunks[1]["evidence"] == ["checked"]

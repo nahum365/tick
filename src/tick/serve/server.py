@@ -173,6 +173,8 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
             return handlers.chat_create(context, self._body())
         if method == "GET" and path == "/v1/chat":
             return 200, handlers.chat_list(context)
+        if method == "POST" and path == "/v1/setup/chat":
+            return handlers.setup_chat_create(context, self._body())
         if method == "POST" and path == "/v1/provider/codex/login":
             self._require_empty_body()
             return handlers.provider_login_start(context)
@@ -323,6 +325,12 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
             if method == "DELETE":
                 self._require_empty_body()
                 return handlers.chat_delete(context, pieces[2])
+        if len(pieces) == 4 and pieces[:3] == ["v1", "setup", "chat"]:
+            if method == "GET":
+                return 200, handlers.setup_chat_get(context, pieces[3])
+            if method == "DELETE":
+                self._require_empty_body()
+                return handlers.setup_chat_delete(context, pieces[3])
         if len(pieces) == 3 and pieces[:2] == ["v1", "drafts"] and method == "GET":
             return 200, handlers.draft_get(context, pieces[2])
         if len(pieces) == 3 and pieces[:2] == ["v1", "agents"] and method == "GET":
@@ -334,6 +342,13 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
             and method == "POST"
         ):
             return 200, JSONLines(handlers.chat_turn(context, pieces[2], self._body()))
+        if (
+            len(pieces) == 5
+            and pieces[:3] == ["v1", "setup", "chat"]
+            and pieces[4] == "turns"
+            and method == "POST"
+        ):
+            return 200, JSONLines(handlers.setup_chat_turn(context, pieces[3], self._body()))
         if len(pieces) == 4 and pieces[:2] == ["v1", "approvals"] and method == "POST":
             raise APIError(404, "route_not_found", "this box route does not exist. Check the URL.")
         if len(pieces) == 3 and pieces[:2] == ["v1", "approvals"] and method == "POST":

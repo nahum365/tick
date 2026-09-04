@@ -164,7 +164,10 @@ class AnthropicChatClient:
                     if isinstance(result, dict) and result.get("executed") is False:
                         yield {"kind": "proposal", **result}
                     else:
-                        yield {"kind": "tool_result", "name": name, "result": result}
+                        chunk = {"kind": "tool_result", "name": name, "result": result}
+                        if isinstance(result, dict) and isinstance(result.get("evidence"), list):
+                            chunk["evidence"] = result["evidence"]
+                        yield chunk
                     tool_results.append(
                         {
                             "type": "tool_result",

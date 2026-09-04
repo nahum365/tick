@@ -13,7 +13,12 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from tick.agents import Provider, availability, client_for
-from tick.auth import FileTokenStorage, LoopbackAuthorization, build_oauth_provider
+from tick.auth import (
+    ROBINHOOD_MCP_URL,
+    FileTokenStorage,
+    LoopbackAuthorization,
+    build_oauth_provider,
+)
 from tick.broker import (
     Category,
     MCPSession,
@@ -33,6 +38,7 @@ from tick.broker import (
     streamable_http_session,
     verify_session_profile,
 )
+from tick.broker.profile_model import proposal_reply_from_document
 from tick.broker.toolmap import dig
 from tick.records import DataSource, Ledger, RecordKind, write_private_file
 
@@ -117,6 +123,78 @@ class BrokerOperations:
         finally:
             session.close()
             loopback.__exit__(None, None, None)
+
+    def inventory(self) -> Mapping[str, Any]:
+        """Read the complete advertised contracts without granting any authority."""
+        from tick.broker import contract_for, inventory_hash
+
+        server = self._known_server()
+        session, loopback = self._session(server)
+        try:
+            contracts = tuple(contract_for(tool) for tool in session.list_tools())
+            return {
+                "server_url": server,
+                "inventory_hash": inventory_hash(contracts),
+                "contracts": [contract.model_dump(mode="json") for contract in contracts],
+                "evidence": ["display_only"],
+            }
+        finally:
+            session.close()
+            loopback.__exit__(None, None, None)
+
+    def propose_document(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Persist a provider document only after schema checks and hard denials."""
+        document = body.get("document")
+        if set(body) != {"document"} or not isinstance(document, Mapping):
+            raise ValueError(
+                "document must be the complete broker proposal object. Ask the provider "
+                "to emit it again."
+            )
+        server = self._known_server()
+        reply = proposal_reply_from_document(document, model=None)
+
+        class DocumentCategorizer:
+            version = "setup-chat-v1"
+
+            def propose(self, _contracts):
+                return reply
+
+        session, loopback = self._session(server)
+        try:
+            proposal = propose_profile(
+                session.list_tools(),
+                server=server,
+                account_id=None,
+                proposed_at=datetime.now(UTC),
+                categorizer=DocumentCategorizer(),
+            )
+            save_proposal(self.home, proposal)
+            warnings = {
+                name: list(tool.warnings) for name, tool in proposal.tools.items() if tool.warnings
+            }
+            return {
+                "proposal": proposal.model_dump(mode="json"),
+                "warnings": warnings,
+                "denied": sorted(
+                    name
+                    for name, tool in proposal.tools.items()
+                    if tool.category is not None and tool.category.denied
+                ),
+            }
+        finally:
+            session.close()
+            loopback.__exit__(None, None, None)
+
+    def _known_server(self) -> str:
+        """Use the server already pinned locally, or the connected official endpoint."""
+        try:
+            proposal = load_proposal(self.home)
+        except Exception:  # noqa: BLE001 - absence or invalid local draft both fall through
+            proposal = None
+        if proposal is not None:
+            return proposal.server
+        profile = load_profile(self.home)
+        return profile.server if profile is not None else ROBINHOOD_MCP_URL
 
     def _categorizer(self, body: Mapping[str, Any]) -> ModelCategorizer | None:
         named = body.get("provider") or os.environ.get("TICK_PROFILE_PROVIDER")

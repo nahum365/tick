@@ -33,6 +33,7 @@ def context(home, metadata: Metadata) -> ServeContext:
         tunnel_status=lambda: (True, "ok"),
         unit_fragments=lambda: (True, "ok", ("paper",)),
         chat_adapter=lambda _provider, _model, _transcript, _frame: (),
+        setup_chat_adapter=lambda _provider, _model, _transcript, _frame, _session: (),
         provider_login_start=lambda: {},
         provider_browser_login_start=lambda _viewport: {},
         provider_login_status=lambda _login: {},

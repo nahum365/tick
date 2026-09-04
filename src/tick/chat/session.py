@@ -38,7 +38,16 @@ class ChatTurn(BaseModel):
 
     seq: int
     at: AwareDatetime
-    kind: Literal["user", "text", "tool_call", "tool_result", "proposal", "done", "error"]
+    kind: Literal[
+        "user",
+        "text",
+        "tool_call",
+        "tool_result",
+        "proposal",
+        "document",
+        "done",
+        "error",
+    ]
     payload: Mapping[str, Any]
     prev_hash: str
     hash: str
@@ -72,6 +81,36 @@ class ChatSession:
         model: str | None,
         at: datetime,
     ) -> ChatSession:
+        return cls._create(home, provider=provider, model=model, at=at, scope=None)
+
+    @classmethod
+    def create_setup(
+        cls,
+        home: Path,
+        *,
+        provider: Provider,
+        model: str | None,
+        at: datetime,
+        scope: str,
+    ) -> ChatSession:
+        """Create a scoped conversation without changing ordinary chat tools."""
+        if not scope.strip():
+            raise ChatError(
+                "CHAT_SCOPE_INVALID",
+                "scope must name one setup conversation. Choose a supported setup scope.",
+            )
+        return cls._create(home, provider=provider, model=model, at=at, scope=scope)
+
+    @classmethod
+    def _create(
+        cls,
+        home: Path,
+        *,
+        provider: Provider,
+        model: str | None,
+        at: datetime,
+        scope: str | None,
+    ) -> ChatSession:
         provider = Provider(provider)
         if provider is Provider.ANTHROPIC and (model is None or not model.strip()):
             raise ChatError(
@@ -85,19 +124,18 @@ class ChatSession:
             )
         session = cls(home, secrets.token_hex(8))
         ensure_private_dir(session.directory)
+        metadata = {
+            "id": session.session_id,
+            "provider": provider.value,
+            "model": model,
+            "created_at": at.isoformat(),
+            "via": "api",
+        }
+        if scope is not None:
+            metadata["scope"] = scope
         write_private_file(
             session.metadata_path,
-            json.dumps(
-                {
-                    "id": session.session_id,
-                    "provider": provider.value,
-                    "model": model,
-                    "created_at": at.isoformat(),
-                    "via": "api",
-                },
-                sort_keys=True,
-            )
-            + "\n",
+            json.dumps(metadata, sort_keys=True) + "\n",
         )
         write_private_file(session.transcript_path, "")
         return session
@@ -110,7 +148,9 @@ class ChatSession:
         values: list[dict[str, Any]] = []
         for path in sorted(root.glob("*/session.json")):
             try:
-                values.append(json.loads(path.read_text(encoding="utf-8")))
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if "scope" not in value:
+                    values.append(value)
             except (OSError, json.JSONDecodeError):
                 continue
         return values
@@ -154,6 +194,17 @@ class ChatSession:
         )
         return turn
 
+    def transcript_hash(self) -> str:
+        """Bind a proposed document to the exact private transcript bytes it followed."""
+        try:
+            return sha256_hex(self.transcript_path.read_bytes())
+        except OSError as exc:
+            raise ChatError(
+                "CHAT_TRANSCRIPT_INVALID",
+                f"chat {self.session_id} transcript cannot be hashed ({exc}). "
+                "Delete this chat or inspect it on the box.",
+            ) from exc
+
     def delete(self) -> None:
         """Delete only this user-owned conversation, never an agent record."""
         for path in (self.transcript_path, self.metadata_path):
@@ -187,7 +238,15 @@ def stream_turn(
     chunks: list[dict[str, Any]] = []
     for raw in adapter(session.turns(), CHAT_FRAME):
         kind = raw.get("kind")
-        if kind not in {"text", "tool_call", "tool_result", "proposal", "done", "error"}:
+        if kind not in {
+            "text",
+            "tool_call",
+            "tool_result",
+            "proposal",
+            "document",
+            "done",
+            "error",
+        }:
             raise ChatError(
                 "CHAT_STREAM_INVALID",
                 "the provider adapter emitted an unknown chunk. The turn stopped; retry it.",

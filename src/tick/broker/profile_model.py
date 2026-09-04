@@ -29,7 +29,13 @@ from .profile import (
     _placeholders,
 )
 
-__all__ = ["MODEL_PROPOSAL_TOOL", "ModelCategorizer", "check_proposal"]
+__all__ = [
+    "MODEL_PROPOSAL_TOOL",
+    "ModelCategorizer",
+    "check_proposal",
+    "proposal_document_schema",
+    "proposal_reply_from_document",
+]
 
 MODEL_PROPOSAL_TOOL = "propose_broker_profile"
 MAX_OUTPUT_TOKENS = 16_000
@@ -140,6 +146,24 @@ def _reply_schema() -> Mapping[str, Any]:
             "required": ["tools"],
         },
     }
+
+
+def proposal_document_schema() -> dict[str, Any]:
+    """Return the strict document schema shared by one-shot and chat proposals."""
+    return dict(_reply_schema()["input_schema"])
+
+
+def proposal_reply_from_document(
+    document: Mapping[str, Any], *, model: str | None
+) -> ProposalReply:
+    """Validate a chat-emitted document before the denial registry sees it."""
+    try:
+        return ProposalReply.model_validate({"model": model, **_normalize_payload(document)})
+    except ValueError as exc:
+        raise ModelReplyError(
+            "the broker draft is not the promised structured document "
+            f"({exc}). Ask the provider to emit the complete document again."
+        ) from exc
 
 
 def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:

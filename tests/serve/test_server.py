@@ -383,6 +383,51 @@ def test_chat_routes_persist_and_stream_typed_json_lines(server_box):
     assert request(server, "DELETE", f"/v1/chat/{chat_id}", secret=secret)[0] == 200
 
 
+def test_setup_chat_routes_start_with_box_text_and_stream_document_state(server_box):
+    server, secret, *_ = server_box
+    refused_status, refused = request(
+        server,
+        "POST",
+        "/v1/setup/chat",
+        secret=secret,
+        body={"scope": "broker_profile", "model": "fixture-model"},
+    )
+    assert refused_status == 400
+    assert "Correct it and start again" in refused["reason"]
+    status, created = request(
+        server,
+        "POST",
+        "/v1/setup/chat",
+        secret=secret,
+        body={"scope": "broker_profile", "provider": "codex"},
+    )
+    assert status == 201
+    chat_id = created["chat"]["id"]
+    assert created["chat"]["scope"] == "broker_profile"
+    assert created["valid"] is False
+    assert [turn["kind"] for turn in created["transcript"]] == ["tool_result", "text"]
+
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+    connection.request(
+        "POST",
+        f"/v1/setup/chat/{chat_id}/turns",
+        body=json.dumps({"text": "Use regular_hours and gfd."}),
+        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
+    )
+    response = connection.getresponse()
+    chunks = [json.loads(line) for line in response.read().splitlines()]
+    connection.close()
+    assert response.status == 200
+    assert [chunk["kind"] for chunk in chunks] == ["text", "document", "done"]
+    assert chunks[1]["valid"] is False
+
+    status, loaded = request(server, "GET", f"/v1/setup/chat/{chat_id}", secret=secret)
+    assert status == 200
+    assert loaded["document"] is None
+    assert loaded["valid"] is False
+    assert request(server, "DELETE", f"/v1/setup/chat/{chat_id}", secret=secret)[0] == 200
+
+
 def test_provider_device_login_and_broker_redirect_completion_are_drivable(server_box):
     server, secret, *_ = server_box
     status, login = request(server, "POST", "/v1/provider/codex/login", secret=secret)

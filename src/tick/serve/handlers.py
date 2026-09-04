@@ -40,7 +40,15 @@ from tick.broker.profile import (
     build_profile,
     mapping_hash,
 )
-from tick.chat import ChatError, ChatSession, ChatTurn, stream_turn
+from tick.chat import (
+    SETUP_FRAMES,
+    ChatError,
+    ChatSession,
+    ChatTurn,
+    SetupChatSession,
+    SetupScope,
+    stream_turn,
+)
 from tick.commons import (
     ClaimBody,
     CommonsClient,
@@ -51,7 +59,7 @@ from tick.commons import (
     load_key,
 )
 from tick.commons.models import ScreenCriterion
-from tick.interview import AgentKind, InterviewError, InterviewSession
+from tick.interview import SLOTS, AgentKind, InterviewError, InterviewSession
 from tick.records import (
     DataSource,
     Ledger,
@@ -119,6 +127,10 @@ __all__ = [
     "chat_get",
     "chat_list",
     "chat_turn",
+    "setup_chat_create",
+    "setup_chat_delete",
+    "setup_chat_get",
+    "setup_chat_turn",
     "commons_keygen",
     "commons_credits",
     "commons_graph",
@@ -242,6 +254,10 @@ class ServeContext:
     unit_fragments: Callable[[], tuple[bool, str, Sequence[str]]]
     chat_adapter: Callable[
         [Provider, str | None, tuple[ChatTurn, ...], str], Iterable[Mapping[str, Any]]
+    ]
+    setup_chat_adapter: Callable[
+        [Provider, str | None, tuple[ChatTurn, ...], str, str],
+        Iterable[Mapping[str, Any]],
     ]
     provider_login_start: Callable[[], Mapping[str, str]]
     provider_browser_login_start: Callable[[Viewport], Mapping[str, str]]
@@ -368,6 +384,10 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         from .broker_ops import BrokerOperations
 
         operations = BrokerOperations(home=home, timeout_seconds=300.0)
+        if action == "inventory":
+            return operations.inventory()
+        if action == "propose_document":
+            return operations.propose_document(body)
         if action == "propose":
             return operations.propose(body)
         if action == "prove":
@@ -402,7 +422,7 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
 
             tick_command = shutil.which("tick") or sys.argv[0]
             client = CodexChatClient.for_environment(tick_command=tick_command)
-            return client.turn(wire, frame)
+            return client.turn(wire, frame, setup_session_id=None)
         if model is None:
             raise ChatError(
                 "CHAT_MODEL_REQUIRED",
@@ -412,12 +432,45 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         from tick.mcpbox import BoxTools, chat_tool_definitions
 
         client = AnthropicChatClient.for_environment(max_steps=8, max_tokens=2048)
-        tools = BoxTools(context)
+        tools = BoxTools(context, setup_session_id=None)
         return client.turn(
             model=model,
             transcript=wire,
             frame=frame,
             tools=chat_tool_definitions(),
+            call_tool=tools.call,
+        )
+
+    def run_setup_chat(
+        provider: Provider,
+        model: str | None,
+        transcript: tuple[ChatTurn, ...],
+        frame: str,
+        session_id: str,
+    ) -> Iterable[Mapping[str, Any]]:
+        wire = tuple(turn.model_dump(mode="json") for turn in transcript)
+        if provider is Provider.CODEX:
+            from tick.agents.codex_client import CodexChatClient
+
+            tick_command = shutil.which("tick") or sys.argv[0]
+            client = CodexChatClient.for_environment(tick_command=tick_command)
+            return client.turn(wire, frame, setup_session_id=session_id)
+        if model is None:
+            raise ChatError(
+                "CHAT_MODEL_REQUIRED",
+                "anthropic setup chat needs the model the user chose. Create it with model.",
+            )
+        from tick.agents import AnthropicChatClient
+        from tick.mcpbox import BoxTools, setup_tool_definitions
+
+        scope = SetupChatSession(home, session_id).state.scope
+        client = AnthropicChatClient.for_environment(max_steps=8, max_tokens=16_000)
+        tools = BoxTools(context, setup_session_id=session_id)
+        return client.turn(
+            model=model,
+            transcript=wire,
+            frame=frame,
+            tools=setup_tool_definitions(scope),
             call_tool=tools.call,
         )
 
@@ -433,6 +486,7 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         tunnel_status=lambda: tunnel_status(home),
         unit_fragments=systemd_unit_fragments,
         chat_adapter=run_chat,
+        setup_chat_adapter=run_setup_chat,
         provider_login_start=start_login,
         provider_browser_login_start=start_browser_login,
         provider_login_status=login_status,
@@ -692,6 +746,121 @@ def chat_delete(context: ServeContext, session_id: str) -> tuple[int, dict[str, 
         ChatSession(context.home, session_id).delete()
     except ChatError as exc:
         raise _chat_error(exc) from exc
+    return 200, {"deleted": session_id}
+
+
+def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    keys = set(body)
+    if (
+        not {"scope", "provider"} <= keys
+        or not keys <= {"scope", "provider", "model"}
+        or not isinstance(body.get("scope"), str)
+        or not isinstance(body.get("provider"), str)
+        or (body.get("model") is not None and not isinstance(body.get("model"), str))
+    ):
+        raise APIError(
+            400,
+            "setup_chat_create_invalid",
+            "the body needs scope and provider, plus model only for anthropic. "
+            "Correct it and start again.",
+        )
+    session: SetupChatSession | None = None
+    try:
+        scope = SetupScope(str(body["scope"]))
+        session = SetupChatSession.create(
+            context.home,
+            scope=scope,
+            provider=Provider(str(body["provider"])),
+            model=str(body["model"]) if body.get("model") is not None else None,
+            at=_aware(context.now()),
+        )
+        if scope is SetupScope.BROKER_PROFILE:
+            inventory = dict(context.broker_profile_operation("inventory", {}))
+            session.chat.append(
+                "tool_result",
+                {
+                    "name": "broker_inventory",
+                    "result": inventory,
+                    "evidence": ["display_only"],
+                },
+                at=_aware(context.now()),
+            )
+            opening = (
+                "Here is the broker's advertised inventory. Propose a complete profile "
+                "document; warnings will come back here for another turn."
+            )
+        else:
+            opening = SLOTS[0].question
+        session.chat.append("text", {"text": opening, "source": "box"}, at=_aware(context.now()))
+        return 201, session.response()
+    except (ChatError, ValueError, OSError) as exc:
+        if session is not None:
+            session.delete()
+        raise _setup_chat_error(exc) from exc
+
+
+def setup_chat_get(context: ServeContext, session_id: str) -> dict[str, Any]:
+    try:
+        return SetupChatSession(context.home, session_id).response()
+    except ChatError as exc:
+        raise _setup_chat_error(exc) from exc
+
+
+def setup_chat_turn(
+    context: ServeContext, session_id: str, body: Mapping[str, Any]
+) -> tuple[dict[str, Any], ...]:
+    if set(body) != {"text"} or not isinstance(body.get("text"), str):
+        raise APIError(
+            400,
+            "setup_chat_turn_invalid",
+            "the body must contain one text message. Correct it and send the turn again.",
+        )
+    setup = SetupChatSession(context.home, session_id)
+    try:
+        metadata = setup.chat.metadata
+        provider = Provider(metadata["provider"])
+        model = metadata.get("model")
+        scope = setup.state.scope
+
+        def adapt(transcript: tuple[ChatTurn, ...], frame: str):
+            terminal: dict[str, Any] | None = None
+            for raw in context.setup_chat_adapter(
+                provider,
+                model,
+                transcript,
+                frame,
+                session_id,
+            ):
+                chunk = dict(raw)
+                if chunk.get("kind") in {"done", "error"}:
+                    terminal = chunk
+                else:
+                    yield chunk
+            state = setup.state
+            yield {
+                "kind": "document",
+                "document": state.document,
+                "valid": state.valid,
+                "verdict": state.verdict,
+            }
+            if terminal is not None:
+                yield terminal
+
+        return stream_turn(
+            setup.chat,
+            str(body["text"]),
+            at=_aware(context.now()),
+            adapter=lambda transcript, _frame: adapt(transcript, SETUP_FRAMES[scope]),
+        )
+    except (ChatError, ValueError) as exc:
+        raise _setup_chat_error(exc) from exc
+
+
+def setup_chat_delete(context: ServeContext, session_id: str) -> tuple[int, dict[str, Any]]:
+    try:
+        SetupChatSession(context.home, session_id).delete()
+    except ChatError as exc:
+        raise _setup_chat_error(exc) from exc
     return 200, {"deleted": session_id}
 
 
@@ -2099,6 +2268,17 @@ def _chat_error(exc: Exception) -> APIError:
         status = 404 if exc.code == "CHAT_NOT_FOUND" else 409
         return APIError(status, exc.code.lower(), exc.reason)
     return APIError(400, "chat_invalid", f"{exc} Correct the chat request and retry.")
+
+
+def _setup_chat_error(exc: Exception) -> APIError:
+    if isinstance(exc, ChatError):
+        status = 404 if exc.code in {"CHAT_NOT_FOUND", "SETUP_CHAT_NOT_FOUND"} else 409
+        return APIError(status, exc.code.lower(), exc.reason)
+    return APIError(
+        409,
+        "setup_chat_refused",
+        f"{exc} Nothing was finalized or adopted; correct the setup state and retry.",
+    )
 
 
 def _aware(value: datetime) -> datetime:

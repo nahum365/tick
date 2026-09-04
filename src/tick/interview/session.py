@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,72 @@ class InterviewSession:
         )
         session._save(state)
         session._ensure_transcript()
+        return session
+
+    @classmethod
+    def from_chat_document(
+        cls,
+        home: str | os.PathLike[str],
+        *,
+        draft_id: str,
+        provider: Provider,
+        document: Mapping[str, Any],
+        transcript: bytes,
+    ) -> InterviewSession:
+        """Materialize a valid chat proposal behind the existing adoption gate."""
+        required = {"spec", "instructions", "approval", "provenance", "model_reported"}
+        if set(document) != required:
+            missing = sorted(required - set(document))
+            extra = sorted(set(document) - required)
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if extra:
+                details.append("off-schema " + ", ".join(extra))
+            raise InterviewError(
+                "DRAFT_DOCUMENT_INVALID",
+                "the proposed agent document is "
+                + "; ".join(details)
+                + ". Ask the provider to emit the complete document again.",
+            )
+        session = cls(home, draft_id)
+        ensure_private_dir(session.directory)
+        try:
+            transcript_text = transcript.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise InterviewError(
+                "TRANSCRIPT_INVALID",
+                "the setup transcript is not UTF-8. Delete the setup chat and start again.",
+            ) from exc
+        write_private_file(session.transcript_path, transcript_text)
+        try:
+            draft = Draft.model_validate(
+                {
+                    "draft_id": draft_id,
+                    "provider": Provider(provider).value,
+                    "transcript_sha256": sha256_hex(transcript),
+                    **dict(document),
+                }
+            )
+        except ValueError as exc:
+            raise InterviewError(
+                "DRAFT_DOCUMENT_INVALID",
+                f"the proposed agent document does not match the agent schema ({exc}). "
+                "Ask the provider to correct it and emit the complete document again.",
+            ) from exc
+        session._save(
+            InterviewState(
+                draft_id=draft_id,
+                provider=Provider(provider),
+                answers={},
+                provenance=draft.provenance,
+                suggestion_discouraged=False,
+                pending_suggestion=None,
+                model_reported=draft.model_reported,
+                draft=draft.payload(),
+            )
+        )
+        draft.to_agent()
         return session
 
     @property

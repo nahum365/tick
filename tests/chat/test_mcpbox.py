@@ -33,6 +33,7 @@ def test_proposal_tool_records_intent_but_never_executes_it(tmp_path):
         tunnel_status=lambda: (True, "ok"),
         unit_fragments=lambda: (True, "ok", ("paper",)),
         chat_adapter=lambda _provider, _model, _transcript, _frame: (),
+        setup_chat_adapter=lambda _provider, _model, _transcript, _frame, _session: (),
         provider_login_start=lambda: {},
         provider_browser_login_start=lambda _viewport: {},
         provider_login_status=lambda _login_id: {},
@@ -53,7 +54,7 @@ def test_proposal_tool_records_intent_but_never_executes_it(tmp_path):
         metadata=type("FixtureMetadata", (), {"tags": lambda self: frozenset()})(),
     )
 
-    result = BoxTools(context).proposal(
+    result = BoxTools(context, setup_session_id=None).proposal(
         "stop", agent_id=agent.agent_id, arguments={}, transcript_hash="sha256:turn"
     )
 

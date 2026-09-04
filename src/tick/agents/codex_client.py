@@ -226,8 +226,11 @@ class CodexChatClient:
             timeout_seconds=CODEX_TIMEOUT_SECONDS,
         )
 
-    def argv(self, *, workdir: Path) -> list[str]:
+    def argv(self, *, workdir: Path, setup_session_id: str | None) -> list[str]:
         """Expose the complete isolation boundary for a direct invariant test."""
+        mcp_args = ["mcp"]
+        if setup_session_id is not None:
+            mcp_args.extend(("--setup-session", setup_session_id))
         return [
             self._binary,
             "exec",
@@ -243,12 +246,16 @@ class CodexChatClient:
             "-c",
             f"mcp_servers.tick.command={json.dumps(self._tick_command)}",
             "-c",
-            'mcp_servers.tick.args=["mcp"]',
+            f"mcp_servers.tick.args={json.dumps(mcp_args, separators=(',', ':'))}",
             "-",
         ]
 
     def turn(
-        self, transcript: Sequence[Mapping[str, Any]], frame: str
+        self,
+        transcript: Sequence[Mapping[str, Any]],
+        frame: str,
+        *,
+        setup_session_id: str | None,
     ) -> tuple[dict[str, Any], ...]:
         """Replay the private transcript and preserve prose versus tool evidence."""
         prompt = json.dumps(
@@ -260,7 +267,11 @@ class CodexChatClient:
             workdir = Path(tmp) / "cwd"
             workdir.mkdir(mode=0o700)
             try:
-                result = self._run(self.argv(workdir=workdir), prompt, self._timeout)
+                result = self._run(
+                    self.argv(workdir=workdir, setup_session_id=setup_session_id),
+                    prompt,
+                    self._timeout,
+                )
             except subprocess.TimeoutExpired as exc:
                 raise ModelReplyError(
                     f"codex did not answer within {self._timeout:.0f}s. The chat turn stopped; "
@@ -311,7 +322,10 @@ def _chat_chunk(event: Any) -> dict[str, Any] | None:
         if result is not None:
             if isinstance(result, dict) and result.get("executed") is False:
                 return {"kind": "proposal", **result}
-            return {"kind": "tool_result", "name": name, "result": result}
+            chunk = {"kind": "tool_result", "name": name, "result": result}
+            if isinstance(result, dict) and isinstance(result.get("evidence"), list):
+                chunk["evidence"] = result["evidence"]
+            return chunk
         return {"kind": "tool_call", "name": name, "arguments": arguments}
     return None
 

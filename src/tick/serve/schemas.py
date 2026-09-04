@@ -127,3 +127,21 @@ class ChatProposalEvent(TypedDict):
     arguments: dict[str, object]
     transcript_hash: str
     executed: Literal[False]
+
+
+class SetupChatStartBody(TypedDict):
+    scope: Literal["broker_profile", "agent_draft"]
+    provider: Literal["codex", "anthropic"]
+    model: NotRequired[str]
+
+
+class SetupChatTurnBody(TypedDict):
+    text: str
+
+
+class SetupChatResponse(TypedDict):
+    chat: dict[str, object]
+    transcript: list[dict[str, object]]
+    document: dict[str, object] | None
+    valid: bool
+    verdict: dict[str, object]

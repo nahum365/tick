@@ -128,6 +128,10 @@ def server_box(box_home: Path):
             {"kind": "text", "text": "fixture reply"},
             {"kind": "done", "model": "fixture-model"},
         ),
+        setup_chat_adapter=lambda _provider, _model, _transcript, _frame, _session: (
+            {"kind": "text", "text": "fixture setup reply"},
+            {"kind": "done", "model": "fixture-model"},
+        ),
         provider_login_start=lambda: {
             "login_id": "login-1",
             "url": "https://login.example.invalid/device",

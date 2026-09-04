@@ -2072,12 +2072,18 @@ def doctor(
 
 
 @app.command("mcp", hidden=True)
-def box_mcp() -> None:
+def box_mcp(
+    setup_session: Annotated[str | None, typer.Option("--setup-session", hidden=True)] = None,
+) -> None:
     """Serve the local box tools over stdio for the user's chat provider."""
     from tick.mcpbox import run_stdio
     from tick.serve.handlers import default_context
 
-    run_stdio(_home(), default_context(_home(), os.environ))
+    run_stdio(
+        _home(),
+        default_context(_home(), os.environ),
+        setup_session_id=setup_session,
+    )
 
 
 # ----------------------------------------------------------------------
