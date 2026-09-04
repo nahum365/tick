@@ -135,6 +135,17 @@ class BrokerConnectManager:
         ):
             time.sleep(0.01)
         if loopback.authorization_url is None:
+            if item.state == "succeeded":
+                # A grant already on the box was accepted without a ceremony: the
+                # provider never had to redirect. The connection is simply open.
+                return {
+                    "authorization_url": None,
+                    "connect_id": connect_id,
+                    "redirect_uri": None,
+                    "disclosure": disclosure_text(),
+                    "state": item.state,
+                    "tools_discovered": item.tools,
+                }
             raise BrokerConnectError(
                 "BROKER_AUTHORIZATION_URL_UNAVAILABLE",
                 (item.reason or "the broker did not issue an authorization URL")
@@ -145,6 +156,8 @@ class BrokerConnectManager:
             "connect_id": connect_id,
             "redirect_uri": loopback.redirect_uri,
             "disclosure": disclosure_text(),
+            "state": item.state,
+            "tools_discovered": item.tools,
         }
 
     def complete(self, connect_id: str, redirect_url: str) -> dict[str, str]:
