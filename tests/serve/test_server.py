@@ -58,6 +58,8 @@ def test_status_has_the_app_join_shape(server_box, box_agent):
     assert agent["run_state"] == "unknown"
     assert agent["current_mode"] is None
     assert payload["broker"]["profile_state"] == "none"
+    assert payload["broker"]["tools_confirmed"] == 0
+    assert payload["broker"]["tools_proved"] == 0
 
 
 def test_new_paper_run_exposes_reboot_demotion(server_box, box_agent, monkeypatch):

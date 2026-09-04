@@ -545,6 +545,22 @@ def status(context: ServeContext) -> dict[str, Any]:
             "profile_hash": profile.profile_hash if profile is not None else None,
             "server_host": urlparse(profile.server).hostname if profile is not None else None,
             "sanction": profile.sanction if profile is not None else None,
+            # The wizard's broker step is finished only when something the runtime
+            # can call has proved; a profile holding just the accounts read is not.
+            "tools_confirmed": (
+                sum(1 for tool in profile.tools.values() if tool.confirmed_at is not None)
+                if profile is not None
+                else 0
+            ),
+            "tools_proved": (
+                sum(
+                    1
+                    for tool in profile.tools.values()
+                    if tool.proof is not None and tool.proof.success
+                )
+                if profile is not None
+                else 0
+            ),
         },
         "ledger_ok": ledger_ok,
     }
