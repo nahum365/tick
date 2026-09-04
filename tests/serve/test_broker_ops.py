@@ -204,3 +204,20 @@ def test_no_eligible_account_refuses_with_the_robinhood_correction(tmp_path):
         "Robinhood reports no account accessible to this agent. Review account access at "
         "Robinhood, then read accounts again."
     )
+
+
+def test_propose_records_its_note_on_the_real_ledger(tmp_path):
+    """Live 2026-09-04: the proposal saved, then the ledger note raised (no clock)
+    and the person saw internal_error after a minute of waiting."""
+    from tick.records import read
+
+    class NoProviderOperations(Operations):
+        def _categorizer(self, _body):
+            return None  # deterministic fallback; the ledger path is what is under test
+
+    ops = NoProviderOperations(home=tmp_path, session=Session(accounts_tool(), []))
+    result = ops.propose({"server_url": SERVER})
+    assert result["state"] == "done"
+    rows = list(read(tmp_path / "broker" / "records.jsonl"))
+    assert rows[-1].payload["event"] == "broker_profile_proposed"
+    assert rows[-1].payload["tools_total"] == 1

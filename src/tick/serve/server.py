@@ -6,6 +6,7 @@ import hmac
 import json
 import threading
 import time
+import traceback
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -129,6 +130,9 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception:  # noqa: BLE001 - transport converts unknown failures safely
+            # The frames go to the journal so the failure can be found on the box;
+            # the request body is never part of a traceback.
+            traceback.print_exc()
             self._write(
                 500,
                 {

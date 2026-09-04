@@ -99,7 +99,7 @@ class BrokerOperations:
                 ),
                 "unmapped": sum(row.category is None for row in proposal.tools.values()),
             }
-            Ledger(self.home / "broker" / "records.jsonl").append(
+            Ledger(self.home / "broker" / "records.jsonl", clock=lambda: datetime.now(UTC)).append(
                 RecordKind.NOTE,
                 {
                     "event": "broker_profile_proposed",
