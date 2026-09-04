@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import stat
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
+from tick.agents import Provider
 from tick.broker import (
     Category,
     DiscoveredTool,
@@ -14,10 +16,13 @@ from tick.broker import (
     ProfileState,
     ProfileTool,
     ProposalReplyTool,
+    ToolResultUnreadable,
     confirm_profile,
     contract_for,
     inventory_hash,
     load_profile,
+    load_proposal,
+    proposal_path,
     save_proposal,
 )
 from tick.broker.profile import (
@@ -28,6 +33,8 @@ from tick.broker.profile import (
     build_profile,
     mapping_hash,
 )
+from tick.chat import SetupChatSession, SetupScope
+from tick.mcpbox import BoxTools
 from tick.serve.broker_ops import BrokerOperations
 
 AT = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
@@ -221,3 +228,77 @@ def test_propose_records_its_note_on_the_real_ledger(tmp_path):
     rows = list(read(tmp_path / "broker" / "records.jsonl"))
     assert rows[-1].payload["event"] == "broker_profile_proposed"
     assert rows[-1].payload["tools_total"] == 1
+
+
+def accounts_document():
+    return {
+        "tools": [
+            {
+                "name": "get_accounts",
+                "category": "read.accounts",
+                "bindings": [],
+                "paths": [
+                    {"role": "items", "path": "data.accounts"},
+                    {"role": "account", "path": "account_number"},
+                    {"role": "eligible", "path": "agentic_allowed"},
+                    {"role": "kind", "path": "brokerage_account_type"},
+                ],
+                "reason": "Lists accounts with broker-declared eligibility.",
+            }
+        ],
+    }
+
+
+def test_setup_creates_first_broker_document_without_an_existing_proposal(tmp_path):
+    setup = SetupChatSession.create(
+        tmp_path,
+        scope=SetupScope.BROKER_PROFILE,
+        provider=Provider.CODEX,
+        model="fixture-model",
+        codex_cli_version="0.149.0",
+        at=AT,
+        goal="simulation",
+    )
+    ops = Operations(home=tmp_path, session=Session(accounts_tool(), []))
+    context = SimpleNamespace(
+        home=tmp_path,
+        now=lambda: AT,
+        broker_profile_operation=lambda action, body: getattr(ops, action)(body),
+    )
+    result = BoxTools(context, setup_session_id=setup.chat.session_id).propose_broker_profile(
+        accounts_document()
+    )
+    assert result["valid"] is True
+    assert setup.state.valid is True
+    assert setup.state.complete is False
+    assert load_proposal(tmp_path).tools["get_accounts"].category == Category.READ_ACCOUNTS
+    assert load_profile(tmp_path) is None
+    assert ops.fake_session.calls == []
+
+
+def test_new_document_preserves_bound_profile_when_editable_draft_is_absent(tmp_path):
+    ops = configured(tmp_path, [row("account-placeholder-1234", True)])
+    ops.accounts()
+    profile_before = load_profile(tmp_path)
+    proposal_path(tmp_path).unlink()
+    ops.fake_session.calls.clear()
+
+    ops.propose_document({"document": accounts_document()})
+
+    assert load_proposal(tmp_path).account_id == "account-placeholder-1234"
+    assert load_profile(tmp_path) == profile_before
+    assert ops.fake_session.calls == []
+
+
+def test_new_document_does_not_overwrite_an_unreadable_existing_draft(tmp_path):
+    path = proposal_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("invalid draft")
+    ops = Operations(home=tmp_path, session=Session(accounts_tool(), []))
+
+    with pytest.raises(ToolResultUnreadable):
+        ops.propose_document({"document": accounts_document()})
+
+    assert path.read_text() == "invalid draft"
+    assert load_profile(tmp_path) is None
+    assert ops.fake_session.calls == []

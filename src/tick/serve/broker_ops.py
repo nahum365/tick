@@ -31,6 +31,7 @@ from tick.broker import (
     has_confirmation_note,
     load_profile,
     load_proposal,
+    proposal_path,
     propose_profile,
     prove_profile,
     prove_proposal,
@@ -152,7 +153,8 @@ class BrokerOperations:
                 "to emit it again."
             )
         server = self._known_server()
-        previous = load_proposal(self.home)
+        # A fresh setup creates its first draft here; existing drafts must still parse.
+        previous = load_proposal(self.home) if proposal_path(self.home).exists() else None
         profile = load_profile(self.home)
         account_id = (
             previous.account_id
