@@ -156,7 +156,13 @@ class BoxTools:
         probe_values = {**setup.state.probe_values, **probe}
         try:
             result = dict(
-                self.context.broker_profile_operation("prove_draft", {"probe": probe_values})
+                self.context.broker_profile_operation(
+                    "prove_draft",
+                    {
+                        "probe": probe_values,
+                        **({"reads_only": True} if setup.state.goal == "simulation" else {}),
+                    },
+                )
             )
         except Exception as exc:  # noqa: BLE001 - proof refusal must become conversation
             verdict = {
@@ -176,8 +182,13 @@ class BoxTools:
             )
             return {"valid": False, **verdict}
         outcomes = result.get("outcome")
-        passed = isinstance(outcomes, dict) and all(
-            isinstance(value, dict) and value.get("success") is True for value in outcomes.values()
+        passed = (
+            isinstance(outcomes, dict)
+            and bool(outcomes)
+            and all(
+                isinstance(value, dict) and value.get("success") is True
+                for value in outcomes.values()
+            )
         )
         waiting_for = _proof_needs(outcomes if isinstance(outcomes, dict) else {})
         verdict = {

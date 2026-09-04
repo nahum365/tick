@@ -1581,6 +1581,7 @@ def prove_profile(
     *,
     probe_values: Mapping[str, Any],
     at: datetime,
+    reads_only: bool = False,
 ) -> tuple[Profile, Mapping[str, ProofResult]]:
     """Exercise confirmed reads and preflight only, using caller-supplied inputs.
 
@@ -1596,6 +1597,8 @@ def prove_profile(
     outcomes: dict[str, ProofResult] = {}
     updated: dict[str, ProfileTool] = dict(profile.tools)
     for name, stored in profile.tools.items():
+        if reads_only and not stored.category.value.startswith("read."):
+            continue
         if not (
             stored.category.value.startswith("read.") or stored.category is Category.ORDER_PREFLIGHT
         ):
@@ -1699,6 +1702,7 @@ def prove_proposal(
     *,
     probe_values: Mapping[str, Any],
     at: datetime,
+    reads_only: bool = False,
 ) -> Mapping[str, ProofResult]:
     """Exercise proposed reads and preflight without creating authorization.
 
@@ -1714,6 +1718,10 @@ def prove_proposal(
     live = {contract.name: contract for contract in _contracts(session.list_tools())}
     outcomes: dict[str, ProofResult] = {}
     for name, mapping in proposal.tools.items():
+        if reads_only and (
+            mapping.category is None or not mapping.category.value.startswith("read.")
+        ):
+            continue
         if mapping.category is None or not (
             mapping.category.value.startswith("read.")
             or mapping.category is Category.ORDER_PREFLIGHT

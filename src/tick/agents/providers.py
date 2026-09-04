@@ -33,6 +33,7 @@ from enum import StrEnum
 from .anthropic_client import API_KEY_ENV, AnthropicModelClient
 from .client import ModelClient
 from .codex_client import CODEX_BINARY, CodexModelClient
+from .credentials import environment_key
 from .errors import ProviderUnavailable
 
 __all__ = [
@@ -123,6 +124,12 @@ _BUILDERS: Mapping[Provider, Callable[[], ModelClient]] = {
 def availability(provider: Provider, environ: Mapping[str, str] | None = None) -> tuple[bool, str]:
     """Whether this machine can reach `provider` now, and what to do if not."""
     info = PROVIDERS[provider]
+    if provider is Provider.ANTHROPIC and environ is None:
+        try:
+            if environment_key():
+                return True, "anthropic: available (credential on this machine)."
+        except (ValueError, OSError):
+            return False, "anthropic: saved credential unreadable. Reconnect from model settings."
     if info.available(os.environ if environ is None else environ):
         return True, f"{provider.value}: available ({info.requires} present)."
     return False, f"{provider.value}: not available. To fix: {info.how_to_make_available()}"

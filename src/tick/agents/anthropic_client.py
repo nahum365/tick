@@ -5,7 +5,8 @@ bounding the compiler's adapter has:
 
 - **The key is the user's, from the user's environment.** `ANTHROPIC_API_KEY`,
   or a key the caller passes for the length of one call. Tick never writes a
-  key to disk, never puts one in a record, and never reads one from `TICK_HOME`.
+  key in a record. A paired device may save a private key under `TICK_HOME`;
+  that local key is used only when no environment key is configured.
 - **There is no Tick endpoint.** No `base_url`, no proxy, no gateway, no
   default host of our own. The traffic is between the user and the provider
   they pay, which is what "bring your own model" has to mean if the account
@@ -25,7 +26,6 @@ against a stand-in with the SDK's shape and no socket exists in a test.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import anthropic
@@ -38,6 +38,7 @@ from .client import (
     first_tool_call,
     intents_of,
 )
+from .credentials import environment_key
 from .errors import MissingApiKey, ModelReplyError
 from .schema import EMIT_TOOL_NAME, TOOL_NAMES
 
@@ -49,12 +50,12 @@ __all__ = [
     "read_structured_reply",
 ]
 
-#: The only place a key is read from. Tick stores none.
+#: Existing environment configuration takes precedence over paired-device keys.
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 
 _NO_KEY = (
     f"no model API key. A model agent runs on YOUR account: set {API_KEY_ENV} in this "
-    f"shell, or pass one in. Tick operates no model endpoint of its own, stores no key, "
+    f"shell, or connect Anthropic from your paired phone. Tick operates no hosted model endpoint, "
     f"and will not tick a model agent without one."
 )
 
@@ -74,7 +75,7 @@ class AnthropicModelClient:
     @classmethod
     def for_environment(cls, *, api_key: str | None = None) -> AnthropicModelClient:
         """Build a client from the user's own key. Never from anything of ours."""
-        key = api_key if api_key is not None else os.environ.get(API_KEY_ENV)
+        key = api_key if api_key is not None else environment_key()
         if not key:
             raise MissingApiKey(_NO_KEY)
         return cls(anthropic.Anthropic(api_key=key))
@@ -116,8 +117,10 @@ class AnthropicChatClient:
         self._max_tokens = max_tokens
 
     @classmethod
-    def for_environment(cls, *, max_steps: int, max_tokens: int) -> AnthropicChatClient:
-        key = os.environ.get(API_KEY_ENV)
+    def for_environment(
+        cls, *, max_steps: int, max_tokens: int, api_key: str | None = None
+    ) -> AnthropicChatClient:
+        key = api_key if api_key is not None else environment_key()
         if not key:
             raise MissingApiKey(_NO_KEY)
         return cls(
@@ -238,3 +241,51 @@ def read_model_reply(reply: Any) -> ModelReply:
 
 #: A structural assertion for a reader: this adapter satisfies the port above.
 _PORT_CONFORMANCE: type[ModelClient] = AnthropicModelClient
+
+
+def available_models(key: str, *, transport: Any = None) -> list[dict[str, str]]:
+    """Read account model metadata through the provider SDK, never inference.
+
+    Redirects and SDK retries are disabled. Pagination is bounded and the
+    upstream response/body/headers never enter a displayable failure message.
+    """
+    import time
+
+    deadline = time.monotonic() + 25
+    models: dict[str, dict[str, str]] = {}
+    cursor: str | None = None
+    seen: set[str] = set()
+    try:
+        with anthropic.Anthropic(
+            api_key=key,
+            max_retries=0,
+            http_client=anthropic.DefaultHttpxClient(transport=transport, follow_redirects=False),
+        ) as client:
+            for _ in range(20):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError("Anthropic model discovery timed out. Retry discovery.")
+                params: dict[str, Any] = {"limit": 1000, "timeout": min(20, remaining)}
+                if cursor:
+                    params["after_id"] = cursor
+                page = client.models.list(**params)
+                for row in page.data:
+                    if isinstance(row.id, str) and row.id.strip():
+                        models[row.id] = {
+                            "provider": "anthropic",
+                            "model": row.id,
+                            "display_name": row.display_name
+                            if isinstance(row.display_name, str)
+                            else row.id,
+                        }
+                if page.has_more is False:
+                    return list(models.values())
+                cursor = page.last_id
+                if not isinstance(cursor, str) or not cursor or cursor in seen:
+                    break
+                seen.add(cursor)
+    except (anthropic.APIError, AttributeError, TypeError) as exc:
+        raise ValueError(
+            "Anthropic could not verify this connection. Check your API key and access."
+        ) from exc
+    raise ValueError("Anthropic model pagination did not finish. Retry discovery.")

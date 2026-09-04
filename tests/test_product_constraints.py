@@ -109,7 +109,8 @@ BROKER_TRANSPORT_MODULES = (
 
 #: Where an `http_client` may be handed to a library: the one file that opens
 #: the MCP transport, and it passes a client with no base URL of its own — the
-#: server URL is the transport's own argument. Nothing else may pass one.
+#: server URL is the transport's own argument. The SDK metadata client has a
+#: separate exact-construction check below; arbitrary clients remain forbidden.
 HTTP_CLIENT_EXEMPT = ("broker/mcp_session.py",)
 
 #: Everything the product ships. The naming, no-strategies and flat-fee scans
@@ -486,6 +487,14 @@ def test_no_client_anywhere_is_pointed_at_an_endpoint_of_ticks_own(path: Path):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if isinstance(node, ast.keyword) and node.arg in ENDPOINT_KEYWORDS - permitted:
+            if relative == "agents/anthropic_client.py" and node.arg == "http_client":
+                # Account metadata uses the SDK's default host, with redirects
+                # disabled. Only this exact stock-client construction is allowed;
+                # a custom base URL/proxy/client remains an architecture failure.
+                assert ast.unparse(node.value) == (
+                    "anthropic.DefaultHttpxClient(transport=transport, follow_redirects=False)"
+                )
+                continue
             raise AssertionError(
                 f"{relative} line {node.lineno} passes {node.arg!r}. "
                 f"Redirecting a client is how a hosted path appears."

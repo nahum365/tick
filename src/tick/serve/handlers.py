@@ -27,9 +27,9 @@ from tick.agents import (
     ModelReplyError,
     Provider,
     ProviderUnavailable,
-    availability,
     is_model_agent,
 )
+from tick.agents.credentials import anthropic_key
 from tick.auth import FileTokenStorage
 from tick.broker import (
     BrokerError,
@@ -449,7 +449,9 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         from tick.agents import AnthropicChatClient
         from tick.mcpbox import BoxTools, chat_tool_definitions
 
-        client = AnthropicChatClient.for_environment(max_steps=8, max_tokens=2048)
+        client = AnthropicChatClient.for_environment(
+            max_steps=8, max_tokens=2048, api_key=anthropic_key(home, env)
+        )
         tools = BoxTools(context, setup_session_id=None)
         return client.turn(
             model=model,
@@ -488,7 +490,9 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         from tick.mcpbox import BoxTools, setup_tool_definitions
 
         scope = SetupChatSession(home, session_id).state.scope
-        client = AnthropicChatClient.for_environment(max_steps=8, max_tokens=16_000)
+        client = AnthropicChatClient.for_environment(
+            max_steps=8, max_tokens=16_000, api_key=anthropic_key(home, env)
+        )
         tools = BoxTools(context, setup_session_id=session_id)
         return client.turn(
             model=model,
@@ -619,16 +623,41 @@ def status(context: ServeContext) -> dict[str, Any]:
                     "last_contact": None,
                 }
             )
+    try:
+        has_anthropic = bool(anthropic_key(context.home, context.env))
+    except (ValueError, OSError):
+        has_anthropic = False
     provider = {
-        name: {"available": availability(Provider(name))[0]}
-        for name in (Provider.CODEX.value, Provider.ANTHROPIC.value)
+        Provider.CODEX.value: {"available": context.provider_status()[0]},
+        Provider.ANTHROPIC.value: {"available": has_anthropic},
     }
+    from tick.agents.task_models import load_presets
+
+    try:
+        presets_configured = bool(load_presets(context.home))
+    except (ValueError, OSError):
+        presets_configured = False
+    reads = (
+        [tool for tool in profile.tools.values() if tool.category.value.startswith("read.")]
+        if profile
+        else []
+    )
+    simulation_ready = (
+        bool(profile and profile.account_id and reads)
+        and all(
+            tool.confirmed_at is not None and tool.proof is not None and tool.proof.success
+            for tool in reads
+        )
+        and profile.state is not ProfileState.DRIFTED
+    )
     return {
+        "task_presets_configured": presets_configured,
         "version": __version__,
         "box_time": _aware(context.now()).isoformat(),
         "agents": result_agents,
         "provider": provider,
         "broker": {
+            "simulation_ready": simulation_ready,
             "profile_state": profile.state.value if profile is not None else "none",
             "profile_hash": profile.profile_hash if profile is not None else None,
             "server_host": urlparse(profile.server).hostname if profile is not None else None,
@@ -716,6 +745,9 @@ def doctor_ack_demotion(
 
 
 def chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    from .model_settings import resolve
+
+    body = resolve(context, body)
     if not set(body) <= {"provider", "model"} or "provider" not in body:
         raise APIError(
             400,
@@ -795,10 +827,15 @@ def chat_delete(context: ServeContext, session_id: str) -> tuple[int, dict[str, 
 
 
 def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    from .model_settings import resolve
+
+    body = resolve(context, body)
     keys = set(body)
     if (
         not {"scope", "provider", "resume"} <= keys
-        or not keys <= {"scope", "provider", "resume", "model"}
+        or not keys <= {"scope", "provider", "resume", "model", "goal"}
+        or not isinstance(body.get("goal", "full"), str)
+        or body.get("goal", "full") not in {"full", "simulation"}
         or not isinstance(body.get("scope"), str)
         or not isinstance(body.get("provider"), str)
         or not isinstance(body.get("resume"), bool)
@@ -842,6 +879,7 @@ def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[i
             model=model,
             codex_cli_version=codex_cli_version,
             at=_aware(context.now()),
+            goal=body.get("goal", "full"),
         )
         if scope is SetupScope.BROKER_PROFILE:
             if restored is not None:
@@ -927,7 +965,7 @@ def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[i
         else:
             opening = SLOTS[0].question
         session.chat.append("text", {"text": opening, "source": "box"}, at=_aware(context.now()))
-        if not resume:
+        if not resume and session.state.goal != "simulation":
             tuple(_run_setup_loop(context, session))
         return 201, session.response()
     except (ModelReplyError, ProviderUnavailable) as exc:
@@ -938,6 +976,14 @@ def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[i
         if session is not None:
             session.delete()
         raise _setup_chat_error(exc) from exc
+
+
+def setup_chat_continue(context: ServeContext, session_id: str) -> Iterable[dict[str, Any]]:
+    """Stream automatic setup work after returning the recoverable session ID."""
+    setup = SetupChatSession(context.home, session_id)
+    if setup.state.goal != "simulation":
+        raise APIError(409, "setup_goal_invalid", "Continue this setup in its conversation.")
+    return _run_setup_loop(context, setup)
 
 
 def setup_chat_get(context: ServeContext, session_id: str) -> dict[str, Any]:
@@ -1002,8 +1048,54 @@ def _run_setup_loop(context: ServeContext, setup: SetupChatSession) -> Iterable[
     )
 
 
+def setup_check_reads(
+    context: ServeContext, session_id: str, body: Mapping[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    """Check already-authorized reads using values from this private setup session.
+
+    Does not confirm any tool or select an account. The phone's explicit access
+    action uses the existing, audited confirmation and account selection routes.
+    """
+    if body:
+        raise APIError(400, "setup_check_invalid", "This check takes no additional inputs.")
+    setup = SetupChatSession(context.home, session_id)
+    state = setup.state
+    if (
+        state.scope is not SetupScope.BROKER_PROFILE
+        or state.goal != "simulation"
+        or not state.complete
+    ):
+        raise APIError(
+            409, "setup_not_ready", "Finish the connection questions before checking read access."
+        )
+    try:
+        result = dict(
+            context.broker_profile_operation(
+                "prove", {"probe": dict(state.probe_values), "reads_only": True}
+            )
+        )
+    except (ValueError, OSError) as exc:
+        raise APIError(
+            409,
+            "setup_read_check_failed",
+            "Read access could not be checked. "
+            "Confirm the account and retry the connection checks.",
+        ) from exc
+    return 200, result
+
+
 def _evaluate_setup(context: ServeContext, setup: SetupChatSession) -> SetupLoopDecision:
     state = setup.state
+    checks_document = state.document
+    if state.goal == "simulation" and state.document is not None:
+        checks_document = {
+            **state.document,
+            "tools": {
+                name: row
+                for name, row in state.document.get("tools", {}).items()
+                if str(row.get("category", "")).startswith("read.")
+            },
+        }
     if state.scope is SetupScope.AGENT_DRAFT:
         if state.valid:
             if not state.complete:
@@ -1062,22 +1154,33 @@ def _evaluate_setup(context: ServeContext, setup: SetupChatSession) -> SetupLoop
             events=(),
             completion_text=None,
         )
-    if state.complete and _all_provable_proved(state.document, state.proof):
+    if state.complete and _all_provable_proved(checks_document, state.proof):
         mapped, proved = _broker_completion_counts(state.document, state.proof)
         return SetupLoopDecision(
             status="complete",
             detail="The broker document and every provable mapping are complete.",
             events=(),
             completion_text=(
-                f"The profile is complete: {mapped} tools mapped, {proved} proved. "
-                "Review it and finalize."
+                "Your connection checks are complete. "
+                "Review account access to continue with a simulation."
+                if state.goal == "simulation"
+                else (
+                    f"The profile is complete: {mapped} tools mapped, {proved} proved. "
+                    "Review it and finalize."
+                )
             ),
         )
 
     previously_requested = state.waiting_for
     try:
         result = dict(
-            context.broker_profile_operation("prove_draft", {"probe": dict(state.probe_values)})
+            context.broker_profile_operation(
+                "prove_draft",
+                {
+                    "probe": dict(state.probe_values),
+                    **({"reads_only": True} if state.goal == "simulation" else {}),
+                },
+            )
         )
         outcomes = result.get("outcome") if isinstance(result.get("outcome"), dict) else {}
         proof_event: dict[str, Any] = {
@@ -1094,12 +1197,14 @@ def _evaluate_setup(context: ServeContext, setup: SetupChatSession) -> SetupLoop
             "reason": f"{exc} Fix the named mapping, then propose the complete document again.",
         }
     needs = _proof_needs(outcomes)
-    complete = _all_provable_proved(state.document, outcomes)
+    complete = _all_provable_proved(checks_document, outcomes)
     events = (
         {
             "kind": "progress",
             "step": "proving",
-            "detail": "The box is proving every proposed read and preflight mapping.",
+            "detail": "The box is checking proposed read mappings."
+            if state.goal == "simulation"
+            else "The box is proving every proposed read and preflight mapping.",
         },
         proof_event,
     )
@@ -1125,8 +1230,13 @@ def _evaluate_setup(context: ServeContext, setup: SetupChatSession) -> SetupLoop
             detail="The broker document and every provable mapping are complete.",
             events=events,
             completion_text=(
-                f"The profile is complete: {mapped} tools mapped, {proved} proved. "
-                "Review it and finalize."
+                "Your connection checks are complete. "
+                "Review account access to continue with a simulation."
+                if state.goal == "simulation"
+                else (
+                    f"The profile is complete: {mapped} tools mapped, {proved} proved. "
+                    "Review it and finalize."
+                )
             ),
         )
     verdict = {
@@ -1151,7 +1261,15 @@ def _evaluate_setup(context: ServeContext, setup: SetupChatSession) -> SetupLoop
         at=_aware(context.now()),
     )
     return SetupLoopDecision(
-        status=("waiting_for_person" if needs and previously_requested == needs else "retry"),
+        status=(
+            "waiting_for_person"
+            if needs
+            and (
+                previously_requested == needs
+                or (state.goal == "simulation" and "account_id" in needs)
+            )
+            else "retry"
+        ),
         detail=(
             "Proof is waiting for the person-supplied values named in the checked result."
             if needs and previously_requested == needs
@@ -1202,7 +1320,7 @@ def _provable_tool_names(document: Mapping[str, Any] | None) -> tuple[str, ...]:
 
 
 def _all_provable_proved(document: Mapping[str, Any] | None, outcomes: Mapping[str, Any]) -> bool:
-    return all(
+    return bool(_provable_tool_names(document)) and all(
         isinstance(outcomes.get(name), Mapping) and outcomes[name].get("success") is True
         for name in _provable_tool_names(document)
     )

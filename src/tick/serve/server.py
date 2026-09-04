@@ -163,6 +163,18 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
         self, method: str, path: str, query: Mapping[str, list[str]]
     ) -> tuple[int, dict[str, Any] | JSONLines]:
         context = self.server.context
+        if path == "/v1/providers" and method == "GET":
+            from .model_settings import catalog
+
+            return 200, catalog(context)
+        if path == "/v1/providers/anthropic" and method == "POST":
+            from .model_settings import connect_anthropic
+
+            return connect_anthropic(context, self._body())
+        if path == "/v1/model-presets" and method == "POST":
+            from .model_settings import save
+
+            return save(context, self._body())
         if method == "GET" and path == "/v1/status":
             return 200, handlers.status(context)
         if method == "GET" and path == "/v1/tunnel":
@@ -331,6 +343,21 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
             if method == "DELETE":
                 self._require_empty_body()
                 return handlers.setup_chat_delete(context, pieces[3])
+        if (
+            len(pieces) == 5
+            and pieces[:3] == ["v1", "setup", "chat"]
+            and pieces[4] == "check-reads"
+            and method == "POST"
+        ):
+            return handlers.setup_check_reads(context, pieces[3], self._body())
+        if (
+            len(pieces) == 5
+            and pieces[:3] == ["v1", "setup", "chat"]
+            and pieces[4] == "continue"
+            and method == "POST"
+        ):
+            self._require_empty_body()
+            return 200, JSONLines(handlers.setup_chat_continue(context, pieces[3]))
         if len(pieces) == 3 and pieces[:2] == ["v1", "drafts"] and method == "GET":
             return 200, handlers.draft_get(context, pieces[2])
         if len(pieces) == 3 and pieces[:2] == ["v1", "agents"] and method == "GET":

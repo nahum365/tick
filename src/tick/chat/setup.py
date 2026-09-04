@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
@@ -53,6 +53,7 @@ class SetupState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     scope: SetupScope
+    goal: Literal["full", "simulation"] = "full"
     document: dict[str, Any] | None
     valid: bool
     complete: bool
@@ -80,6 +81,7 @@ class SetupChatSession:
         model: str | None,
         codex_cli_version: str | None,
         at: datetime,
+        goal: Literal["full", "simulation"] = "full",
     ) -> SetupChatSession:
         selected = SetupScope(scope)
         chat = ChatSession.create_setup(
@@ -103,6 +105,7 @@ class SetupChatSession:
                 "reason": "Keep chatting until the box accepts a complete document.",
             },
             at=at,
+            goal=goal,
         )
         return session
 
@@ -135,9 +138,13 @@ class SetupChatSession:
         proof: dict[str, Any],
         verdict: dict[str, Any],
         at: datetime,
+        goal: Literal["full", "simulation"] | None = None,
     ) -> SetupState:
         state = SetupState(
             scope=SetupScope(self.chat.metadata["scope"]),
+            goal=goal
+            if goal is not None
+            else (self.state.goal if self.state_path.exists() else "full"),
             document=document,
             valid=valid,
             complete=complete,
@@ -154,6 +161,7 @@ class SetupChatSession:
         state = self.state
         return {
             "chat": self.chat.metadata,
+            "goal": state.goal,
             "transcript": [turn.model_dump(mode="json") for turn in self.chat.turns()],
             "document": state.document,
             "valid": state.valid,

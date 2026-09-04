@@ -222,7 +222,11 @@ class BrokerOperations:
     def prove_draft(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
         """Prove proposed reads/preflight while leaving the callable profile unchanged."""
         probe = body.get("probe")
-        if set(body) != {"probe"} or not isinstance(probe, dict):
+        if (
+            not {"probe"} <= set(body) <= {"probe", "reads_only"}
+            or not isinstance(probe, dict)
+            or not isinstance(body.get("reads_only", False), bool)
+        ):
             raise ValueError(
                 "probe must be an object of person-supplied values. Supply the values named "
                 "by the proof result and retry."
@@ -239,6 +243,7 @@ class BrokerOperations:
                 session,
                 probe_values=probe,
                 at=datetime.now(UTC),
+                reads_only=body.get("reads_only", False),
             )
             return {
                 "outcome": {
@@ -422,7 +427,7 @@ class BrokerOperations:
 
     def prove(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
         probe = body.get("probe")
-        if not isinstance(probe, dict):
+        if not isinstance(probe, dict) or not isinstance(body.get("reads_only", False), bool):
             raise ValueError(
                 "probe must be an object of user-supplied values. Correct it and retry."
             )
@@ -439,7 +444,13 @@ class BrokerOperations:
                 account_id=profile.account_id,
                 confirmation_recorded=has_confirmation_note(self.home, profile.profile_hash),
             )
-            proven, outcomes = prove_profile(profile, verified, probe_values=probe, at=at)
+            proven, outcomes = prove_profile(
+                profile,
+                verified,
+                probe_values=probe,
+                at=at,
+                reads_only=body.get("reads_only", False),
+            )
             save_profile(self.home, proven)
             Ledger(self.home / "broker" / "records.jsonl", clock=lambda: at).append(
                 RecordKind.NOTE,

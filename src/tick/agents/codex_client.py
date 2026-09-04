@@ -41,10 +41,13 @@ the real one, and it refuses when the binary is not installed.
 from __future__ import annotations
 
 import json
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -566,3 +569,111 @@ def _tail(text: str, lines: int = 3) -> str:
 
 #: A structural assertion for a reader: this adapter satisfies the port.
 _PORT_CONFORMANCE: type[ModelClient] = CodexModelClient
+
+
+def codex_models(env: Mapping[str, str], *, timeout: float = 25) -> list[dict[str, str]]:
+    process = subprocess.Popen(  # noqa: S603
+        ["codex", "app-server", "--listen", "stdio://"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=dict(env),
+        start_new_session=True,
+    )
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def read() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
+    deadline = time.monotonic() + timeout
+    sequence = 0
+
+    def send(value: dict[str, Any]) -> None:
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(value) + "\n")
+        process.stdin.flush()
+
+    def rpc(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        nonlocal sequence
+        sequence += 1
+        send({"id": sequence, "method": method, "params": params})
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("Codex model discovery timed out. Retry the connection.")
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise ValueError("Codex model discovery timed out. Retry the connection.") from exc
+            if line is None:
+                raise ValueError("Codex closed model discovery. Reconnect Codex.")
+            message = json.loads(line)
+            if not isinstance(message, dict):
+                raise ValueError("Codex returned an unreadable response.")
+            if message.get("id") == sequence and "method" not in message:
+                if "error" in message:
+                    raise ValueError("Codex could not list your models. Reconnect or update Codex.")
+                result = message.get("result")
+                if not isinstance(result, dict):
+                    raise ValueError("Codex returned an unreadable model catalog.")
+                return result
+            if "id" in message and "method" in message:
+                # Discovery never approves tools, supplies secrets, or starts work.
+                send(
+                    {
+                        "id": message["id"],
+                        "error": {"code": -32601, "message": "Metadata-only client"},
+                    }
+                )
+
+    try:
+        rpc("initialize", {"clientInfo": {"name": "tick", "title": "Tick", "version": "0.1.0"}})
+        send({"method": "initialized"})
+        account = rpc("account/read", {"refreshToken": False})
+        if account.get("account") is None:
+            raise ValueError("Sign in to Codex on your server to see your models.")
+        cursor: str | None = None
+        models: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for _ in range(20):
+            page = rpc("model/list", {"limit": 100, "includeHidden": False, "cursor": cursor})
+            rows = page.get("data")
+            if not isinstance(rows, list):
+                raise ValueError("Codex returned an unreadable model catalog.")
+            for row in rows:
+                if not isinstance(row, dict) or row.get("hidden") is True:
+                    continue
+                model = row.get("model")
+                if isinstance(model, str) and model.strip():
+                    models.append(
+                        {
+                            "provider": "codex",
+                            "model": model,
+                            "display_name": row.get("displayName")
+                            if isinstance(row.get("displayName"), str)
+                            else model,
+                        }
+                    )
+            cursor = page.get("nextCursor")
+            if not cursor:
+                return list({row["model"]: row for row in models}.values())
+            if not isinstance(cursor, str) or cursor in seen:
+                break
+            seen.add(cursor)
+        raise ValueError("Codex model pagination did not finish. Retry discovery.")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        if process.stdin:
+            process.stdin.close()
+        if process.stdout:
+            process.stdout.close()

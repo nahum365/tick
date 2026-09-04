@@ -79,7 +79,24 @@ def run_setup_loop(
         terminal = False
         try:
             provider_chunks = adapter(
-                setup.chat.turns_for_replay(), SETUP_FRAMES[setup.state.scope]
+                setup.chat.turns_for_replay(),
+                SETUP_FRAMES[setup.state.scope]
+                + (
+                    " This setup is for simulation only. Check the read capabilities needed for "
+                    "account and market data. Do not require order preflight, live order "
+                    "permissions, quantities or sides for order tests. Live trading is set up "
+                    "separately. Explain progress in plain language: connection checks and the "
+                    "person's agent plan, not documents, proofs, mappings or schema vocabulary. "
+                    "Technical results remain in the activity record."
+                    if setup.state.goal == "simulation"
+                    and setup.state.scope.value == "broker_profile"
+                    else (
+                        " Explain the person’s agent plan in plain language. Start in simulation; "
+                        "live trading is configured separately."
+                    )
+                    if setup.state.goal == "simulation"
+                    else ""
+                ),
             )
             for raw in provider_chunks:
                 kind = raw.get("kind")

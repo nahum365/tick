@@ -72,7 +72,15 @@ def test_status_has_the_app_join_shape(server_box, box_agent):
     server, secret, *_ = server_box
     status, payload = request(server, "GET", "/v1/status", secret=secret)
     assert status == 200
-    assert set(payload) == {"version", "box_time", "agents", "provider", "broker", "ledger_ok"}
+    assert set(payload) == {
+        "version",
+        "box_time",
+        "agents",
+        "provider",
+        "broker",
+        "ledger_ok",
+        "task_presets_configured",
+    }
     agent = payload["agents"][0]
     assert agent["id"] == box_agent.agent_id
     assert agent["run_state"] == "unknown"
