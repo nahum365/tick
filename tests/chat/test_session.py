@@ -78,7 +78,7 @@ def test_provider_failure_before_either_stream_is_a_409(tmp_path):
     )
     bodies = (
         {"provider": "codex"},
-        {"scope": "agent_draft", "provider": "codex"},
+        {"scope": "agent_draft", "provider": "codex", "resume": False},
     )
     creators = (chat_create, setup_chat_create)
 
@@ -112,7 +112,7 @@ def test_provider_failure_during_both_streams_is_a_final_visible_refusal(tmp_pat
     _status, chat = chat_create(context, {"provider": "codex"})
     _status, setup = setup_chat_create(
         context,
-        {"scope": "agent_draft", "provider": "codex"},
+        {"scope": "agent_draft", "provider": "codex", "resume": False},
     )
 
     ordinary_chunks = tuple(chat_turn(context, chat["id"], {"text": "hello"}))
@@ -131,3 +131,86 @@ def test_provider_failure_during_both_streams_is_a_final_visible_refusal(tmp_pat
         assert [turn.kind for turn in turns][-2:] == ["user", "text"]
         assert turns[-1].payload["source"] == "provider"
         assert "codex login" in turns[-1].payload["text"]
+
+
+def test_restored_broker_chat_starts_from_box_draft_counts(tmp_path, monkeypatch):
+    restored = {
+        "proposal": {
+            "tools": {
+                "accounts": {"category": "read.accounts"},
+                "quote": {"category": "read.quote"},
+                "transfer": {"category": "denied.transfers"},
+            }
+        },
+        "profile": {
+            "tools": {
+                "accounts": {
+                    "category": "read.accounts",
+                    "confirmed_at": AT.isoformat(),
+                    "proof": {"success": True},
+                },
+                "quote": {
+                    "category": "read.quote",
+                    "confirmed_at": AT.isoformat(),
+                    "proof": None,
+                },
+                "transfer": {
+                    "category": "denied.transfers",
+                    "confirmed_at": None,
+                    "proof": None,
+                },
+            }
+        },
+    }
+    monkeypatch.setattr("tick.serve.handlers.broker_profile", lambda _context: restored)
+    context = SimpleNamespace(
+        home=tmp_path,
+        now=lambda: AT,
+        codex_chat_identity=lambda model: {
+            "model": model or "fixture-model",
+            "codex_cli_version": "0.149.0",
+        },
+    )
+
+    status, response = setup_chat_create(
+        context,
+        {"scope": "broker_profile", "provider": "codex", "resume": True},
+    )
+
+    assert status == 201
+    assert response["document"] == restored["proposal"]
+    assert response["valid"] is True
+    assert [turn["kind"] for turn in response["transcript"]] == ["tool_result", "text"]
+    assert response["transcript"][0]["payload"]["name"] == "broker_draft"
+    assert response["transcript"][1]["payload"]["text"] == (
+        "Restored broker draft from your box: 2 tools mapped, 2 finalized, "
+        "1 awaiting proof; say what to change, or finalize."
+    )
+
+
+def test_setup_resume_refusals_name_the_available_next_step(tmp_path, monkeypatch):
+    context = SimpleNamespace(
+        home=tmp_path,
+        now=lambda: AT,
+        codex_chat_identity=lambda model: {
+            "model": model or "fixture-model",
+            "codex_cli_version": "0.149.0",
+        },
+    )
+    with pytest.raises(APIError) as unsupported:
+        setup_chat_create(
+            context,
+            {"scope": "agent_draft", "provider": "codex", "resume": True},
+        )
+    assert "Start the agent interview again" in unsupported.value.reason
+
+    monkeypatch.setattr(
+        "tick.serve.handlers.broker_profile",
+        lambda _context: {"proposal": None, "profile": None},
+    )
+    with pytest.raises(APIError) as missing:
+        setup_chat_create(
+            context,
+            {"scope": "broker_profile", "provider": "codex", "resume": True},
+        )
+    assert "Start the broker connection first" in missing.value.reason

@@ -792,22 +792,39 @@ def chat_delete(context: ServeContext, session_id: str) -> tuple[int, dict[str, 
 def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     keys = set(body)
     if (
-        not {"scope", "provider"} <= keys
-        or not keys <= {"scope", "provider", "model"}
+        not {"scope", "provider", "resume"} <= keys
+        or not keys <= {"scope", "provider", "resume", "model"}
         or not isinstance(body.get("scope"), str)
         or not isinstance(body.get("provider"), str)
+        or not isinstance(body.get("resume"), bool)
         or (body.get("model") is not None and not isinstance(body.get("model"), str))
     ):
         raise APIError(
             400,
             "setup_chat_create_invalid",
-            "the body needs scope and provider and may include a chosen model. Correct it and "
-            "start again.",
+            "the body needs scope, provider, and an explicit resume boolean, and may include "
+            "a chosen model. Correct it and start again.",
         )
     session: SetupChatSession | None = None
     try:
         scope = SetupScope(str(body["scope"]))
         provider = Provider(str(body["provider"]))
+        resume = bool(body["resume"])
+        restored: dict[str, Any] | None = None
+        if resume:
+            if scope is not SetupScope.BROKER_PROFILE:
+                raise ChatError(
+                    "SETUP_RESUME_UNSUPPORTED",
+                    "only a broker profile draft can be restored here. Start the agent "
+                    "interview again.",
+                )
+            restored = broker_profile(context)
+            if restored["proposal"] is None and restored["profile"] is None:
+                raise ChatError(
+                    "BROKER_DRAFT_NOT_FOUND",
+                    "the box has no broker draft or profile to restore. Start the broker "
+                    "connection first.",
+                )
         model, codex_cli_version = _chat_identity(
             context,
             provider,
@@ -822,20 +839,82 @@ def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[i
             at=_aware(context.now()),
         )
         if scope is SetupScope.BROKER_PROFILE:
-            inventory = dict(context.broker_profile_operation("inventory", {}))
-            session.chat.append(
-                "tool_result",
-                {
-                    "name": "broker_inventory",
-                    "result": inventory,
-                    "evidence": ["display_only"],
-                },
-                at=_aware(context.now()),
-            )
-            opening = (
-                "Here is the broker's advertised inventory. Propose a complete profile "
-                "document; warnings will come back here for another turn."
-            )
+            if restored is not None:
+                proposal = restored["proposal"]
+                profile = restored["profile"]
+                proposal_tools = proposal.get("tools", {}) if proposal is not None else {}
+                profile_tools = profile.get("tools", {}) if profile is not None else {}
+                mapped = sum(
+                    1
+                    for tool in (proposal_tools or profile_tools).values()
+                    if str(tool.get("category", "")).startswith(("read.", "order."))
+                )
+                finalized = sum(
+                    1 for tool in profile_tools.values() if tool.get("confirmed_at") is not None
+                )
+                awaiting_proof = sum(
+                    1
+                    for tool in profile_tools.values()
+                    if tool.get("confirmed_at") is not None
+                    and (
+                        str(tool.get("category", "")).startswith("read.")
+                        or tool.get("category") == Category.ORDER_PREFLIGHT.value
+                    )
+                    and not (
+                        isinstance(tool.get("proof"), Mapping)
+                        and tool["proof"].get("success") is True
+                    )
+                )
+                valid = proposal is not None
+                verdict = {
+                    "code": (
+                        "BROKER_DOCUMENT_RESTORED"
+                        if valid
+                        else "BROKER_PROFILE_RESTORED_WITHOUT_DRAFT"
+                    ),
+                    "reason": (
+                        "The box restored the current broker document. The person can keep "
+                        "chatting or finalize tools individually."
+                        if valid
+                        else "The box restored the finalized profile without an editable "
+                        "draft. Ask for a complete document before changing it."
+                    ),
+                }
+                session.save(
+                    document=proposal,
+                    valid=valid,
+                    verdict=verdict,
+                    at=_aware(context.now()),
+                )
+                session.chat.append(
+                    "tool_result",
+                    {
+                        "name": "broker_draft",
+                        "result": {**restored, "valid": valid},
+                        "evidence": ["display_only"],
+                    },
+                    at=_aware(context.now()),
+                )
+                opening = (
+                    f"Restored broker draft from your box: {mapped} tools mapped, "
+                    f"{finalized} finalized, {awaiting_proof} awaiting proof; say what to "
+                    "change, or finalize."
+                )
+            else:
+                inventory = dict(context.broker_profile_operation("inventory", {}))
+                session.chat.append(
+                    "tool_result",
+                    {
+                        "name": "broker_inventory",
+                        "result": inventory,
+                        "evidence": ["display_only"],
+                    },
+                    at=_aware(context.now()),
+                )
+                opening = (
+                    "Here is the broker's advertised inventory. Propose a complete profile "
+                    "document; warnings will come back here for another turn."
+                )
         else:
             opening = SLOTS[0].question
         session.chat.append("text", {"text": opening, "source": "box"}, at=_aware(context.now()))

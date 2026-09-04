@@ -401,7 +401,7 @@ def test_setup_chat_routes_start_with_box_text_and_stream_document_state(server_
         "POST",
         "/v1/setup/chat",
         secret=secret,
-        body={"scope": "broker_profile", "provider": "codex"},
+        body={"scope": "broker_profile", "provider": "codex", "resume": False},
     )
     assert status == 201
     chat_id = created["chat"]["id"]

@@ -132,6 +132,7 @@ class ChatProposalEvent(TypedDict):
 class SetupChatStartBody(TypedDict):
     scope: Literal["broker_profile", "agent_draft"]
     provider: Literal["codex", "anthropic"]
+    resume: bool
     model: NotRequired[str]
 
 
