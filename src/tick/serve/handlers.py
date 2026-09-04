@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -215,7 +216,7 @@ class ServeContext:
     provider_login_start: Callable[[], Mapping[str, str]]
     provider_login_status: Callable[[str], Mapping[str, str]]
     codex_install: Callable[[], Mapping[str, str]]
-    broker_connect_start: Callable[[str | None], Mapping[str, Any]]
+    broker_connect_start: Callable[[str | None, str | None], Mapping[str, Any]]
     broker_connect_complete: Callable[[str, str], Mapping[str, Any]]
     broker_connect_status: Callable[[str], Mapping[str, Any]]
     broker_profile_operation: Callable[[str, Mapping[str, Any]], Mapping[str, Any]]
@@ -267,12 +268,12 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
             )
         return login_manager.status(login_id)
 
-    def start_connect(server_url: str | None) -> Mapping[str, Any]:
+    def start_connect(server_url: str | None, redirect_scheme: str | None) -> Mapping[str, Any]:
         nonlocal connect_manager
         from .broker_connect import BrokerConnectManager
 
         connect_manager = BrokerConnectManager.for_environment(home=home)
-        return connect_manager.start(server_url)
+        return connect_manager.start(server_url, redirect_scheme)
 
     def complete_connect(connect_id: str, redirect_url: str) -> Mapping[str, Any]:
         from .broker_connect import BrokerConnectError
@@ -1427,7 +1428,7 @@ def broker_profile(context: ServeContext) -> dict[str, Any]:
 def broker_connect_start(
     context: ServeContext, body: Mapping[str, Any]
 ) -> tuple[int, dict[str, Any]]:
-    if not set(body) <= {"server_url"} or (
+    if not set(body) <= {"server_url", "redirect_scheme"} or (
         "server_url" in body and not isinstance(body["server_url"], str)
     ):
         raise APIError(
@@ -1435,10 +1436,20 @@ def broker_connect_start(
             "broker_connect_invalid",
             "server_url, when supplied, must be text. Correct it and start again.",
         )
+    scheme = body.get("redirect_scheme")
+    if scheme is not None and not (
+        isinstance(scheme, str) and re.fullmatch(r"[a-z][a-z0-9+.-]{1,31}", scheme)
+    ):
+        raise APIError(
+            400,
+            "broker_connect_invalid",
+            "redirect_scheme, when supplied, must be a lowercase URL scheme like tick. "
+            "Correct it and start again.",
+        )
     from .broker_connect import BrokerConnectError
 
     try:
-        result = dict(context.broker_connect_start(body.get("server_url")))
+        result = dict(context.broker_connect_start(body.get("server_url"), scheme))
     except BrokerConnectError as exc:
         raise APIError(409, exc.code.lower(), exc.reason) from exc
     _record_api_mutation(context, "broker", "broker_connection_started")

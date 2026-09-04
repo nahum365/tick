@@ -115,7 +115,7 @@ def server_box(box_home: Path):
             "sha256": "f" * 64,
             "reason": "fixture installed",
         },
-        broker_connect_start=lambda server_url: {
+        broker_connect_start=lambda server_url, _scheme: {
             "authorization_url": "https://login.example.invalid/authorize?state=test",
             "connect_id": "connect-1",
             "redirect_uri": "http://127.0.0.1:48123/tick/callback",

@@ -489,3 +489,18 @@ def test_broker_profile_operations_reuse_the_injected_box_boundary(server_box):
 
 def test_state_summary_still_reads_same_agent(box_agent):
     assert state_summary(box_agent)["agent_id"] == box_agent.agent_id
+
+
+def test_broker_connect_passes_the_phone_redirect_scheme_and_refuses_odd_ones(server_box):
+    server, secret = server_box[0], server_box[1]
+    status, connect = request(
+        server, "POST", "/v1/broker/connect", secret=secret, body={"redirect_scheme": "tick"}
+    )
+    assert status == 202 and "authorization_url" in connect
+    status, body = request(
+        server, "POST", "/v1/broker/connect", secret=secret, body={"redirect_scheme": "Bad Scheme"}
+    )
+    assert status == 400
+    assert body["reason"].startswith(
+        "redirect_scheme, when supplied, must be a lowercase URL scheme"
+    )

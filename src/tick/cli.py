@@ -2212,6 +2212,7 @@ def _with_broker_session(
         timeout_seconds=timeout_seconds,
         open_browser=open_browser,
         announce=typer.echo,
+        redirect_uri_override=None,
     )
     loopback.__enter__()
     try:

@@ -4,7 +4,8 @@
 
     storage = FileTokenStorage(tick_home(os.environ))
     with LoopbackAuthorization(
-        port=0, timeout_seconds=300.0, open_browser=True, announce=print
+        port=0, timeout_seconds=300.0, open_browser=True, announce=print,
+        redirect_uri_override=None
     ) as loopback:
         provider = build_oauth_provider(
             server_url=ROBINHOOD_MCP_URL, storage=storage, loopback=loopback

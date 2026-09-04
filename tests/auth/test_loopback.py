@@ -32,6 +32,7 @@ def loopback(announce=None, *, open_browser: bool = False) -> LoopbackAuthorizat
         timeout_seconds=5.0,
         open_browser=open_browser,
         announce=announce if announce is not None else (lambda line: None),
+        redirect_uri_override=None,
     )
 
 
@@ -155,7 +156,11 @@ async def test_a_stray_request_does_not_end_the_wait():
 def test_a_wait_that_times_out_says_nothing_was_authorised():
     """Fail safe: the ceremony ends, the listener closes, and nothing is half-done."""
     auth = LoopbackAuthorization(
-        port=0, timeout_seconds=0.2, open_browser=False, announce=lambda line: None
+        port=0,
+        timeout_seconds=0.2,
+        open_browser=False,
+        announce=lambda line: None,
+        redirect_uri_override=None,
     )
     with auth:
         with pytest.raises(CallbackError) as caught:
@@ -199,12 +204,48 @@ def test_the_state_compared_is_the_one_the_sdk_sent():
 def test_an_impossible_port_is_refused(port: int):
     with pytest.raises(ValueError):
         LoopbackAuthorization(
-            port=port, timeout_seconds=1.0, open_browser=False, announce=lambda line: None
+            port=port,
+            timeout_seconds=1.0,
+            open_browser=False,
+            announce=lambda line: None,
+            redirect_uri_override=None,
         )
 
 
 def test_a_non_positive_timeout_is_refused():
     with pytest.raises(ValueError):
         LoopbackAuthorization(
-            port=0, timeout_seconds=0.0, open_browser=False, announce=lambda line: None
+            port=0,
+            timeout_seconds=0.0,
+            open_browser=False,
+            announce=lambda line: None,
+            redirect_uri_override=None,
+        )
+
+
+def test_a_custom_scheme_override_is_registered_and_accepted_on_completion():
+    """The phone app cannot intercept http://127.0.0.1; it registers tick://broker/callback."""
+    with LoopbackAuthorization(
+        port=0,
+        timeout_seconds=5.0,
+        open_browser=False,
+        announce=lambda _line: None,
+        redirect_uri_override="tick://broker/callback",
+    ) as auth:
+        assert auth.redirect_uri == "tick://broker/callback"
+        auth._expected_state = "st4te"
+        auth.complete_redirect_url("tick://broker/callback?code=c0de&state=st4te")
+        assert auth._server.captured == {"code": "c0de", "state": "st4te"}
+        with pytest.raises(CallbackError):
+            auth.complete_redirect_url("http://127.0.0.1:1/tick/callback?code=x&state=st4te")
+
+
+def test_an_override_that_is_not_a_custom_scheme_url_is_refused():
+    with pytest.raises(ValueError):
+        LoopbackAuthorization(
+            port=0,
+            timeout_seconds=5.0,
+            open_browser=False,
+            announce=lambda _line: None,
+            redirect_uri_override="https://evil.example.invalid/callback?x=",
         )

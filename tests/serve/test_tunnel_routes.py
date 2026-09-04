@@ -42,7 +42,7 @@ def context(home, metadata: Metadata) -> ServeContext:
             "sha256": "f" * 64,
             "reason": "fixture installed",
         },
-        broker_connect_start=lambda _server: {},
+        broker_connect_start=lambda _server, _scheme: {},
         broker_connect_complete=lambda _connect, _url: {},
         broker_connect_status=lambda _connect: {},
         broker_profile_operation=lambda _action, _body: {},

@@ -25,7 +25,11 @@ from tick.auth import (
 
 def a_loopback() -> LoopbackAuthorization:
     return LoopbackAuthorization(
-        port=0, timeout_seconds=5.0, open_browser=False, announce=lambda line: None
+        port=0,
+        timeout_seconds=5.0,
+        open_browser=False,
+        announce=lambda line: None,
+        redirect_uri_override=None,
     )
 
 

@@ -42,7 +42,7 @@ def test_proposal_tool_records_intent_but_never_executes_it(tmp_path):
             "sha256": "f" * 64,
             "reason": "fixture installed",
         },
-        broker_connect_start=lambda _server: {},
+        broker_connect_start=lambda _server, _scheme: {},
         broker_connect_complete=lambda _connect_id, _url: {},
         broker_connect_status=lambda _connect_id: {},
         broker_profile_operation=lambda _action, _body: {},

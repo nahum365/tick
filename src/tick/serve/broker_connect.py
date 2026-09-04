@@ -69,7 +69,10 @@ class BrokerConnectManager:
             session_factory=session_factory,
         )
 
-    def start(self, server_url: str | None) -> dict[str, object]:
+    def start(self, server_url: str | None, redirect_scheme: str | None) -> dict[str, object]:
+        """`redirect_scheme` is the phone app's own URL scheme; the redirect registered
+        with the broker becomes `<scheme>://broker/callback` so the in-app browser can
+        intercept it and post it back. None keeps the loopback redirect."""
         server = server_url or ROBINHOOD_MCP_URL
         if sanction_for(server) != "official":
             raise BrokerConnectError(
@@ -82,6 +85,9 @@ class BrokerConnectManager:
             timeout_seconds=self._timeout,
             open_browser=False,
             announce=lambda _line: None,
+            redirect_uri_override=(
+                f"{redirect_scheme}://broker/callback" if redirect_scheme else None
+            ),
         )
         loopback.__enter__()
         connect_id = secrets.token_hex(10)

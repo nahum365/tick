@@ -30,6 +30,7 @@ second source of truth for it is a second thing that can drift.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import webbrowser
 from collections.abc import Callable
@@ -50,6 +51,8 @@ __all__ = [
 
 #: The only interface the callback listener binds. Not `0.0.0.0`, ever.
 LOOPBACK_HOST = "127.0.0.1"
+#: A native-app custom scheme redirect (RFC 8252 §7.1): scheme, host-ish label, path.
+_SAFE_OVERRIDE = re.compile(r"^[a-z][a-z0-9+.-]{1,31}://[a-z0-9.-]{1,64}/[A-Za-z0-9/_-]{1,128}$")
 
 #: The path the authorization server is told to redirect to.
 CALLBACK_PATH = "/tick/callback"
@@ -122,7 +125,20 @@ class LoopbackAuthorization:
         timeout_seconds: float,
         open_browser: bool,
         announce: Callable[[str], None],
+        redirect_uri_override: str | None,
     ) -> None:
+        """`redirect_uri_override` registers a non-loopback redirect (a phone's own URL
+        scheme, e.g. `tick://broker/callback`) while the state check and code handling
+        stay here: the phone cannot intercept a loopback redirect, so the
+        app posts the captured URL back through `complete_redirect_url`. None keeps
+        the loopback redirect the CLI ceremony uses."""
+        if redirect_uri_override is not None and not _SAFE_OVERRIDE.fullmatch(
+            redirect_uri_override
+        ):
+            raise ValueError(
+                "redirect_uri_override must be a custom-scheme URL like tick://broker/callback"
+            )
+        self._override = redirect_uri_override
         if port < 0 or port > 65535:
             raise ValueError(f"port ({port}) must be between 0 and 65535; 0 picks a free one")
         if timeout_seconds <= 0:
@@ -164,6 +180,9 @@ class LoopbackAuthorization:
     @property
     def redirect_uri(self) -> str:
         """Where the authorization server is told to send the code back."""
+        if self._override is not None:
+            self._require_server()
+            return self._override
         return f"http://{LOOPBACK_HOST}:{self.port}{CALLBACK_PATH}"
 
     def _require_server(self) -> _CallbackServer:
@@ -221,13 +240,22 @@ class LoopbackAuthorization:
         """Hand the phone-captured loopback redirect to the same state-checking path."""
         parsed = urlparse(redirect_url)
         server = self._require_server()
-        if (
-            parsed.hostname != LOOPBACK_HOST
-            or parsed.port != self.port
-            or parsed.path != CALLBACK_PATH
-        ):
+        if self._override is not None:
+            expected = urlparse(self._override)
+            matches = (
+                parsed.scheme == expected.scheme
+                and parsed.netloc == expected.netloc
+                and parsed.path == expected.path
+            )
+        else:
+            matches = (
+                parsed.hostname == LOOPBACK_HOST
+                and parsed.port == self.port
+                and parsed.path == CALLBACK_PATH
+            )
+        if not matches:
             raise CallbackError(
-                "the posted redirect URL does not target this box's active loopback callback. "
+                "the posted redirect URL does not target this box's active callback. "
                 "Return to the current authorization session and post its complete redirect URL."
             )
         query = parse_qs(parsed.query)

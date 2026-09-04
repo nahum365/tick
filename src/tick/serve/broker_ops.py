@@ -44,6 +44,7 @@ class BrokerOperations:
             timeout_seconds=self.timeout,
             open_browser=False,
             announce=lambda _line: None,
+            redirect_uri_override=None,
         )
         loopback.__enter__()
         provider = build_oauth_provider(server_url=server, storage=storage, loopback=loopback)
