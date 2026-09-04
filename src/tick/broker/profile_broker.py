@@ -17,6 +17,7 @@ advertised contract matched, not that a malicious server behaves like it.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -99,7 +100,13 @@ class ProfileBroker:
 
     @property
     def account_id(self) -> str:
-        return self._verified.profile.account_id
+        account_id = self._verified.profile.account_id
+        if account_id is None:
+            raise CapabilityUnmapped(
+                "no eligible broker account is selected. Read accounts and select one before "
+                "using an account-scoped capability."
+            )
+        return account_id
 
     @property
     def profile_hash(self) -> str:
@@ -293,7 +300,30 @@ class ProfileBroker:
                 code=RejectCode.BROKER_REFUSED,
                 reason=f"order {order_id} was not cancelled: {exc}",
             )
-        at = timestamp_at(payload, mapping.result["cancelled_at"], f"cancel time for {order_id}")
+        accepted_path = mapping.result.get("accepted")
+        if accepted_path is not None:
+            accepted = dig(payload, accepted_path)
+            if accepted is not True:
+                return Rejected(
+                    code=RejectCode.BROKER_REFUSED,
+                    reason=(
+                        f"the broker did not accept cancellation of {order_id}. Inspect the "
+                        "order at the broker or try again after its state changes."
+                    ),
+                )
+            # This is the box-observed acceptance time, not a timestamp invented as
+            # broker evidence; final cancellation state remains an orders read.
+            return Cancelled(order_id=order_id, ts=datetime.now(UTC))
+        cancelled_path = mapping.result.get("cancelled_at")
+        if cancelled_path is None:
+            return Rejected(
+                code=RejectCode.ORDER_OUTCOME_UNKNOWN,
+                reason=(
+                    f"the cancel of {order_id} has neither an accepted flag nor a broker "
+                    "timestamp mapping. It may have taken effect; inspect it at the broker."
+                ),
+            )
+        at = timestamp_at(payload, cancelled_path, f"cancel time for {order_id}")
         if isinstance(at, Unavailable):
             return Rejected(
                 code=RejectCode.ORDER_OUTCOME_UNKNOWN,

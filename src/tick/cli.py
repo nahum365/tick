@@ -15,7 +15,7 @@
     tick ledger new <agent-id>
     tick connect robinhood --account <agentic-account-id>
     tick broker tools
-    tick broker propose --account <agentic-account-id>
+    tick broker propose
     tick broker confirm --yes-all-reads
     tick broker prove --probe symbol=XYZ
 
@@ -2321,7 +2321,7 @@ def connect_robinhood(
     typer.echo(f"{len(tools)} tool(s) discovered. Nothing about them is assumed.")
     typer.echo(f"server sanction: {sanction}")
     typer.echo(f"The grant is stored in {storage.directory}, readable by you alone.")
-    typer.echo("Next: tick broker propose --account <your Agentic account id>")
+    typer.echo("Next: tick broker propose")
 
 
 @disconnect_app.command("robinhood")
@@ -2369,7 +2369,7 @@ def broker_tools(
     for tool in tools:
         _describe_tool(tool)
     typer.echo("")
-    typer.echo(f"{len(tools)} tool(s). Propose them with: tick broker propose --account <id>")
+    typer.echo(f"{len(tools)} tool(s). Propose them with: tick broker propose")
 
 
 def _describe_tool(tool: DiscoveredTool) -> None:
@@ -2395,8 +2395,7 @@ def _load_proposal(home: Path) -> ProfileProposal:
     path = _proposal_path(home)
     if not path.exists():
         _fail(
-            f"no proposal exists at {path}. Run `tick broker propose --account <id>` "
-            "first; no tool was confirmed."
+            f"no proposal exists at {path}. Run `tick broker propose` first; no tool was confirmed."
         )
     try:
         return ProfileProposal.model_validate_json(path.read_text(encoding="utf-8"))
@@ -2426,12 +2425,12 @@ def _parse_assignments(values: list[str] | None, *, option: str) -> dict[str, ob
 @broker_app.command("propose")
 def broker_propose(
     account: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--account",
-            help="The account id every account-taking read and order must name.",
+            help="Legacy local account binding; normally discover it after read.accounts.",
         ),
-    ],
+    ] = None,
     server_url: Annotated[
         str, typer.Option("--server-url", help="The MCP server whose complete inventory to pin.")
     ] = ROBINHOOD_MCP_URL,
@@ -2792,7 +2791,7 @@ def broker_status(
         return
     if profile is None:
         typer.echo(f"profile state: none at {profile_path(home)}")
-        typer.echo("run: tick broker propose --account <your account id>")
+        typer.echo("run: tick broker propose")
         return
     typer.echo(f"server: {profile.server}")
     typer.echo(f"sanction: {profile.sanction}")

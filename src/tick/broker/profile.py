@@ -60,6 +60,9 @@ __all__ = [
     "DriftDifference",
     "Profile",
     "ProfileProposal",
+    "ProposalEdit",
+    "ProposalReply",
+    "ProposalReplyTool",
     "ProfileState",
     "ProfileTool",
     "ProofResult",
@@ -73,16 +76,20 @@ __all__ = [
     "confirm_profile",
     "contract_for",
     "diff_profile",
+    "edit_proposal",
     "has_confirmation_note",
     "inventory_hash",
     "load_profile",
+    "load_proposal",
     "mapping_hash",
     "migrate_toolmap",
     "profile_ledger_path",
     "profile_path",
+    "proposal_path",
     "propose_profile",
     "prove_profile",
     "save_profile",
+    "save_proposal",
     "sanction_for",
     "verify_session_profile",
 ]
@@ -322,22 +329,52 @@ def inventory_hash(tools: Sequence[DiscoveredTool] | Sequence[ToolContract]) -> 
 
 
 ARGUMENT_PLACEHOLDERS: Mapping[Category, frozenset[str]] = {
-    Category.READ_ACCOUNTS: frozenset({"account_id"}),
+    Category.READ_ACCOUNTS: frozenset(),
     Category.READ_POSITIONS: frozenset({"account_id"}),
     Category.READ_BALANCES: frozenset({"account_id"}),
     Category.READ_ORDERS: frozenset({"account_id"}),
     Category.READ_QUOTE: frozenset({"symbol"}),
-    Category.READ_HISTORY: frozenset({"symbol", "count"}),
+    Category.READ_HISTORY: frozenset({"symbol", "count", "start_time", "end_time", "interval"}),
     Category.READ_INSTRUMENTS: frozenset({"symbol", "query"}),
     Category.READ_MARKET_HOURS: frozenset({"at"}),
     Category.ORDER_PREFLIGHT: frozenset(
-        {"account_id", "symbol", "side", "qty", "order_type", "time_in_force", "extended_hours"}
+        {
+            "account_id",
+            "symbol",
+            "side",
+            "qty",
+            "order_type",
+            "time_in_force",
+            "extended_hours",
+            "limit_price",
+            "stop_price",
+        }
     ),
     Category.ORDER_PLACE: frozenset(
-        {"account_id", "symbol", "side", "qty", "order_type", "time_in_force", "extended_hours"}
+        {
+            "account_id",
+            "symbol",
+            "side",
+            "qty",
+            "order_type",
+            "time_in_force",
+            "extended_hours",
+            "limit_price",
+            "stop_price",
+            "idempotency_key",
+        }
     ),
     Category.ORDER_REPLACE: frozenset(
-        {"account_id", "order_id", "qty", "order_type", "time_in_force", "extended_hours"}
+        {
+            "account_id",
+            "order_id",
+            "qty",
+            "order_type",
+            "time_in_force",
+            "extended_hours",
+            "limit_price",
+            "stop_price",
+        }
     ),
     Category.ORDER_CANCEL: frozenset({"account_id", "order_id"}),
     Category.DENIED_MONEY_MOVEMENT: frozenset(),
@@ -354,17 +391,49 @@ REQUIRED_PLACEHOLDERS: Mapping[Category, frozenset[str]] = {
 }
 
 REQUIRED_RESULT_ROLES: Mapping[Category, tuple[str, ...]] = {
-    Category.READ_ACCOUNTS: ("items", "account"),
+    Category.READ_ACCOUNTS: ("items", "account", "eligible", "kind"),
     Category.READ_POSITIONS: ("items", "account", "symbol", "quantity", "average_cost"),
     Category.READ_BALANCES: ("items", "account", "cash"),
     Category.READ_ORDERS: ("items", "account", "order_id"),
     Category.READ_QUOTE: ("price", "asof"),
     Category.READ_HISTORY: ("items", "timestamp", "open", "high", "low", "close", "volume"),
     Category.ORDER_PLACE: ("order_id", "quantity", "price", "filled_at"),
-    Category.ORDER_CANCEL: ("order_id", "cancelled_at"),
+    Category.ORDER_CANCEL: (),
 }
 
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
+
+
+def _placeholders(value: Any) -> frozenset[str]:
+    """Collect placeholders recursively so array arguments cannot bypass the grammar."""
+    if isinstance(value, str):
+        return frozenset(_PLACEHOLDER.findall(value))
+    if isinstance(value, Mapping):
+        return frozenset().union(*(_placeholders(item) for item in value.values()))
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return frozenset().union(*(_placeholders(item) for item in value))
+    return frozenset()
+
+
+def _render_template(value: Any, values: Mapping[str, Any], *, exact_strings: bool) -> Any:
+    """Render nested templates without turning array elements into one JSON-looking string."""
+    if isinstance(value, str):
+        wanted = _PLACEHOLDER.findall(value)
+        missing = [key for key in wanted if key not in values]
+        if missing:
+            raise KeyError(missing[0])
+        exact = _PLACEHOLDER.fullmatch(value)
+        if exact is not None and not exact_strings:
+            return values[exact.group(1)]
+        return _PLACEHOLDER.sub(lambda match: str(values[match.group(1)]), value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _render_template(item, values, exact_strings=False)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_render_template(item, values, exact_strings=False) for item in value]
+    return value
 
 
 def mapping_hash(
@@ -436,50 +505,9 @@ class ProfileTool(ProfileModel):
             raise ValueError("a callable tool must confirm its exact contract hash")
         if self.confirmed_at is None or self.confirmed_by is None:
             raise ValueError("a mapped read or order tool requires who confirmed it and when")
-        used = frozenset(
-            match
-            for value in self.arguments.values()
-            if isinstance(value, str)
-            for match in _PLACEHOLDER.findall(value)
-        )
-        allowed = ARGUMENT_PLACEHOLDERS[self.category]
-        if not used <= allowed:
-            raise ValueError(
-                f"{self.category.value} asks Tick for {sorted(used - allowed)}, which it "
-                "has no business supplying to that tool"
-            )
-        required = REQUIRED_PLACEHOLDERS.get(self.category, frozenset())
-        if not required <= used:
-            raise ValueError(
-                f"{self.category.value} does not carry {sorted(required - used)}; an "
-                "order missing one of those is a different order"
-            )
-        missing = [
-            role for role in REQUIRED_RESULT_ROLES.get(self.category, ()) if role not in self.result
-        ]
-        if missing:
-            raise ValueError(
-                f"{self.category.value} says nothing about {missing} in its answer; "
-                "Tick reads values by confirmed path and never by guesswork"
-            )
-        schema_required = set(self.contract.input_schema.get("required") or ())
-        absent = schema_required - set(self.arguments)
-        if absent:
-            raise ValueError(
-                f"{self.contract.name} requires inputs {sorted(absent)} with no confirmed "
-                "template or fixed literal; Tick will not rely on broker defaults"
-            )
-        if self.category.value.startswith("order."):
-            for argument_name in self.contract.input_schema.get("properties", {}):
-                role = _argument_for(argument_name)
-                if role in {"order_type", "time_in_force", "extended_hours"} and (
-                    argument_name not in self.arguments
-                ):
-                    raise ValueError(
-                        f"{self.contract.name} exposes meaning-bearing input "
-                        f"{argument_name!r}; confirmation must bind an explicit template "
-                        "or fixed literal rather than rely on a broker default"
-                    )
+        # Proposal checks are warnings by owner ruling.  Confirmation records the
+        # person's exact draft; proof and the final JSON-schema check decide whether
+        # it is usable, without silently repairing any missing value or path.
         proof_values = (
             self.proved_contract_hash,
             self.proved_mapping_hash,
@@ -504,27 +532,22 @@ class ProfileTool(ProfileModel):
     def render(self, values: Mapping[str, Any]) -> dict[str, Any]:
         rendered: dict[str, Any] = {}
         for name, template in self.arguments.items():
-            if not isinstance(template, str):
-                rendered[name] = template
-                continue
-            wanted = _PLACEHOLDER.findall(template)
-            missing = [key for key in wanted if key not in values]
-            if missing:
+            expected_type = (
+                self.contract.input_schema.get("properties", {}).get(name, {}).get("type")
+            )
+            try:
+                rendered[name] = _render_template(
+                    template,
+                    values,
+                    exact_strings=expected_type == "string",
+                )
+            except KeyError as exc:
+                missing = [str(exc.args[0])]
                 raise CapabilityUnmapped(
                     f"the confirmed mapping for {self.contract.name} needs {missing} for "
                     f"argument {name!r}, and this call has no such value. Fix the mapping "
                     "and confirm this tool again."
-                )
-            exact = _PLACEHOLDER.fullmatch(template)
-            expected_type = (
-                self.contract.input_schema.get("properties", {}).get(name, {}).get("type")
-            )
-            if exact is not None and expected_type != "string":
-                rendered[name] = values[exact.group(1)]
-            else:
-                rendered[name] = _PLACEHOLDER.sub(
-                    lambda match: str(values[match.group(1)]), template
-                )
+                ) from exc
         return rendered
 
 
@@ -540,7 +563,7 @@ class Profile(ProfileModel):
     """The user-approved broker contract; mutable runtime drift is excluded from its hash."""
 
     server: str
-    account_id: str
+    account_id: str | None
     tools: Mapping[str, ProfileTool]
     inventory_hash: str
     data_class: Literal["display_only"]
@@ -557,8 +580,8 @@ class Profile(ProfileModel):
     def _check(self) -> Profile:
         if _HTTPS_SERVER.match(self.server) is None:
             raise ValueError("a broker profile server must be an https URL with a host")
-        if not self.account_id.strip():
-            raise ValueError("a broker profile must name the account every read is scoped to")
+        if self.account_id is not None and not self.account_id.strip():
+            raise ValueError("a broker profile account is either absent or non-empty")
         if self.sanction != sanction_for(self.server):
             raise ValueError("profile sanction does not match the server host")
         if self.profile_format_version != PROFILE_FORMAT_VERSION:
@@ -570,19 +593,26 @@ class Profile(ProfileModel):
         for name, tool in self.tools.items():
             if name != tool.contract.name:
                 raise ValueError(f"profile key {name!r} does not match tool {tool.contract.name!r}")
-        callable_categories = [
-            tool.category for tool in self.tools.values() if tool.category.callable
-        ]
-        if len(callable_categories) != len(set(callable_categories)):
-            raise ValueError("two tools map the same callable category; routing would be ambiguous")
+        if self.account_id is None and any(
+            tool.category.callable and tool.category is not Category.READ_ACCOUNTS
+            for tool in self.tools.values()
+        ):
+            raise ValueError(
+                "only read.accounts may be confirmed before the person selects an eligible account"
+            )
         if self.profile_hash != profile_hash_for(self):
             raise ValueError("profile_hash does not match the content the user approved")
         return self
 
     def mapping_for(self, category: Category) -> ProfileTool:
-        for tool in self.tools.values():
-            if tool.category is category:
-                return tool
+        matches = [tool for tool in self.tools.values() if tool.category is category]
+        if len(matches) > 1:
+            raise CapabilityUnmapped(
+                f"more than one confirmed tool claims {category.value}. Proof cannot choose "
+                "between them; edit the draft and confirm one mapping."
+            )
+        if matches:
+            return matches[0]
         raise CapabilityUnmapped(
             f"no confirmed tool is mapped to {category.value}. Tick refuses rather than "
             "guessing; run `tick broker propose`, then confirm that exact tool."
@@ -635,12 +665,52 @@ class ProposedTool(ProfileModel):
     category: Category | None
     arguments: Mapping[str, Any]
     result: Mapping[str, str]
-    note: str | None
+    reason: str
+    warnings: tuple[str, ...]
+    original: ProposalReplyTool
+    edits: tuple[ProposalEdit, ...]
+
+    @property
+    def note(self) -> str:
+        """Compatibility label for terminal output; the draft now calls this a reason."""
+        return self.reason
+
+
+class ProposalReplyTool(ProfileModel):
+    """One provider-authored row, before deterministic denial and warnings."""
+
+    name: str
+    category: Category | None
+    arguments: Mapping[str, Any]
+    result: Mapping[str, str]
+    reason: str
+    warnings: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _sentence(self) -> ProposalReplyTool:
+        if not self.name.strip():
+            raise ValueError("a proposal row must name its advertised tool")
+        if not self.reason.strip():
+            raise ValueError("a proposal row must give the person a reason")
+        return self
+
+
+class ProposalReply(ProfileModel):
+    model: str | None
+    tools: tuple[ProposalReplyTool, ...]
+
+
+class ProposalEdit(ProfileModel):
+    field: str
+    old: Any
+    new: Any
+    who: Literal["api", "terminal"]
+    at: AwareDatetime
 
 
 class ProfileProposal(ProfileModel):
     server: str
-    account_id: str
+    account_id: str | None
     sanction: Literal["official", "community"]
     inventory_hash: str
     tools: Mapping[str, ProposedTool]
@@ -650,11 +720,11 @@ class ProfileProposal(ProfileModel):
 
 @runtime_checkable
 class Categorizer(Protocol):
-    """Seam for categorization; the model pass lands with the interview slice."""
+    """One structured whole-inventory proposal through the model port."""
 
     version: str
 
-    def categorize(self, tool: DiscoveredTool) -> Category | None: ...
+    def propose(self, contracts: Sequence[ToolContract]) -> ProposalReply: ...
 
 
 _DENIAL_HINTS: tuple[tuple[Category, tuple[str, ...]], ...] = (
@@ -746,6 +816,8 @@ _RESULT_HINTS: Mapping[Category, Mapping[str, tuple[str, ...]]] = {
     Category.READ_ACCOUNTS: {
         "items": ("accounts", "results"),
         "account": ("account_id", "account", "id"),
+        "eligible": ("agentic_allowed", "eligible"),
+        "kind": ("brokerage_account_type", "kind", "type"),
     },
     Category.READ_ORDERS: {
         "items": ("orders", "results"),
@@ -774,6 +846,7 @@ _RESULT_HINTS: Mapping[Category, Mapping[str, tuple[str, ...]]] = {
         "filled_at": ("filled_at", "executed_at", "timestamp"),
     },
     Category.ORDER_CANCEL: {
+        "accepted": ("accepted",),
         "order_id": ("order_id", "id"),
         "cancelled_at": ("cancelled_at", "canceled_at", "timestamp"),
     },
@@ -803,7 +876,17 @@ def _proposed_mapping(
             return {}, {}, f"required input {name!r} has no value Tick can supply; left unmapped"
     result: dict[str, str] = {}
     declared = set(tool.output_properties())
-    for role, candidates in _RESULT_HINTS.get(category, {}).items():
+    hints = _RESULT_HINTS.get(category, {})
+    if category is Category.ORDER_CANCEL:
+        hints = (
+            {"accepted": hints["accepted"]}
+            if "accepted" in declared
+            else {
+                "order_id": hints["order_id"],
+                "cancelled_at": hints["cancelled_at"],
+            }
+        )
+    for role, candidates in hints.items():
         result[role] = next(
             (candidate for candidate in candidates if candidate in declared), candidates[0]
         )
@@ -813,36 +896,105 @@ def _proposed_mapping(
     return arguments, result, note
 
 
-def propose_profile(
-    tools: Sequence[DiscoveredTool], *, server: str, account_id: str, proposed_at: datetime
-) -> ProfileProposal:
-    """Propose each discovered tool deterministically; unknown means unmapped."""
-    if not account_id.strip():
-        raise ValueError("proposing a profile requires the account every read will be scoped to")
-    contracts = _contracts(tools)
+def denial_for(tool: DiscoveredTool | ToolContract) -> Category | None:
+    """The only proposal rule that overrides both model and person."""
+    name = tool.name.lower()
+    if any(word in name for word in ("credential", "password", "secret", "token", "api_key")):
+        return Category.DENIED_CREDENTIALS
+    if any(word in name for word in ("transfer", "withdraw", "deposit")):
+        return Category.DENIED_TRANSFERS
+    if any(word in name for word in ("move_money", "fund_account", "money_movement")):
+        return Category.DENIED_MONEY_MOVEMENT
+    if any(word in name for word in ("account_setting", "account_preference")):
+        return Category.DENIED_SETTINGS
+    return None
+
+
+def _deterministic_reply(
+    tools: Sequence[DiscoveredTool], contracts: Sequence[ToolContract]
+) -> ProposalReply:
     by_name = {tool.name: tool for tool in tools}
-    proposed: dict[str, ProposedTool] = {}
+    rows: list[ProposalReplyTool] = []
     claimed: set[Category] = set()
     for contract in contracts:
         tool = by_name[contract.name]
-        category = categorize(tool)
+        category = denial_for(tool) or categorize(tool)
         arguments: dict[str, Any] = {}
         result: dict[str, str] = {}
-        note: str | None = None
+        reason = (
+            "the deterministic fallback found no category; connect a provider or map it by hand."
+        )
         if category is not None:
             arguments, result, note = _proposed_mapping(tool, category)
+            reason = note or f"the deterministic fallback matched {category.value}; review it."
             if (not category.denied and not arguments and tool.required_inputs()) or (
                 category.callable and category in claimed
             ):
                 category = None
-                note = (
-                    note
-                    or "another tool already proposed this category; disagreement stays unmapped"
+                reason = note or (
+                    "another tool already claimed this callable category; map it by hand if needed."
                 )
             elif category.callable:
                 claimed.add(category)
+        rows.append(
+            ProposalReplyTool(
+                name=contract.name,
+                category=category,
+                arguments=arguments,
+                result=result,
+                reason=reason,
+            )
+        )
+    return ProposalReply(model=None, tools=tuple(rows))
+
+
+def propose_profile(
+    tools: Sequence[DiscoveredTool],
+    *,
+    server: str,
+    account_id: str | None,
+    proposed_at: datetime,
+    categorizer: Categorizer | None = None,
+) -> ProfileProposal:
+    """Build an editable draft; no row has authority until separately confirmed."""
+    if account_id is not None and not account_id.strip():
+        raise ValueError("an account id is either absent or non-empty")
+    contracts = _contracts(tools)
+    if categorizer is None:
+        reply = _deterministic_reply(tools, contracts)
+        version = CATEGORIZER_VERSION
+    else:
+        from .profile_model import check_proposal
+
+        reply = check_proposal(categorizer.propose(contracts), contracts)
+        version = categorizer.version
+    reply_by_name = {row.name: row for row in reply.tools}
+    proposed: dict[str, ProposedTool] = {}
+    for contract in contracts:
+        row = reply_by_name.get(contract.name)
+        if row is None:
+            row = ProposalReplyTool(
+                name=contract.name,
+                category=None,
+                arguments={},
+                result={},
+                reason=(
+                    "the provider returned no row for this tool; map it by hand if Tick needs it."
+                ),
+            )
+        category = denial_for(contract) or row.category
+        reason = row.reason
+        if denial_for(contract) is not None:
+            reason = "Tick's denial registry makes this capability permanently uncallable."
         proposed[contract.name] = ProposedTool(
-            contract=contract, category=category, arguments=arguments, result=result, note=note
+            contract=contract,
+            category=category,
+            arguments={} if category is not None and category.denied else row.arguments,
+            result={} if category is not None and category.denied else row.result,
+            reason=reason,
+            warnings=row.warnings,
+            original=row,
+            edits=(),
         )
     return ProfileProposal(
         server=server,
@@ -850,7 +1002,7 @@ def propose_profile(
         sanction=sanction_for(server),
         inventory_hash=inventory_hash(contracts),
         tools=proposed,
-        categorizer_version=CATEGORIZER_VERSION,
+        categorizer_version=version,
         proposed_at=proposed_at,
     )
 
@@ -873,12 +1025,108 @@ def profile_path(home: str | os.PathLike[str]) -> Path:
     return Path(home) / "broker" / PROFILE_FILE
 
 
+def proposal_path(home: str | os.PathLike[str]) -> Path:
+    return Path(home) / "broker" / PROPOSAL_FILE
+
+
 def profile_ledger_path(home: str | os.PathLike[str]) -> Path:
     return Path(home) / "broker" / "records.jsonl"
 
 
 def save_profile(home: str | os.PathLike[str], profile: Profile) -> Path:
     return write_private_file(profile_path(home), profile.model_dump_json(indent=2))
+
+
+def save_proposal(home: str | os.PathLike[str], proposal: ProfileProposal) -> Path:
+    return write_private_file(proposal_path(home), proposal.model_dump_json(indent=2))
+
+
+def load_proposal(home: str | os.PathLike[str]) -> ProfileProposal:
+    path = proposal_path(home)
+    try:
+        return ProfileProposal.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError, ValueError) as exc:
+        raise ToolResultUnreadable(
+            f"{path} is not an editable broker proposal ({exc}). Propose one again."
+        ) from exc
+
+
+def edit_proposal(
+    proposal: ProfileProposal,
+    tool_name: str,
+    changes: Mapping[str, Any],
+    *,
+    who: Literal["api", "terminal"],
+    at: datetime,
+) -> ProfileProposal:
+    """Record exact person-owned edits while retaining the provider's original row."""
+    if set(changes) - {"category", "arguments", "result"} or not changes:
+        raise ValueError(
+            "an edit changes category, arguments, or result. Choose at least one field."
+        )
+    current = proposal.tools.get(tool_name)
+    if current is None:
+        raise ValueError(f"tool {tool_name!r} is not in this proposal. Refresh the draft.")
+    if denial_for(current.contract) is not None:
+        raise ValueError(
+            f"tool {tool_name!r} is denied by Tick's registry and cannot be remapped. "
+            "Leave it locked."
+        )
+    values = current.model_dump(mode="python")
+    edits = list(current.edits)
+    for field, raw in changes.items():
+        if field == "category":
+            new: Any = None if raw is None or raw == "not used" else Category(raw)
+            if new is not None and new.denied:
+                raise ValueError(
+                    "people may choose a callable category or not used; denial comes only "
+                    "from Tick's registry."
+                )
+        elif field == "arguments":
+            if not isinstance(raw, Mapping) or any(not isinstance(key, str) for key in raw):
+                raise ValueError("arguments must be an object keyed by declared input name.")
+            new = dict(raw)
+        else:
+            if not isinstance(raw, Mapping) or any(
+                not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
+            ):
+                raise ValueError("result must be an object of role to dotted-path strings.")
+            new = dict(raw)
+        old = values[field]
+        if old != new:
+            edits.append(ProposalEdit(field=field, old=old, new=new, who=who, at=at))
+            values[field] = new
+    values["edits"] = tuple(edits)
+    changed = ProposedTool.model_validate(values)
+    tools = dict(proposal.tools)
+    tools[tool_name] = changed
+
+    from .profile_model import check_proposal
+
+    review = ProposalReply(
+        model=(
+            proposal.categorizer_version.removeprefix("model-v1:")
+            if proposal.categorizer_version.startswith("model-v1:")
+            else None
+        ),
+        tools=tuple(
+            ProposalReplyTool(
+                name=name,
+                category=row.category,
+                arguments=row.arguments,
+                result=row.result,
+                reason=row.reason,
+            )
+            for name, row in tools.items()
+        ),
+    )
+    warned_rows = check_proposal(review, [row.contract for row in tools.values()]).tools
+    warned = {row.name: row.warnings for row in warned_rows}
+    tools = {
+        name: row.model_copy(update={"warnings": warned.get(name, ())})
+        for name, row in tools.items()
+    }
+    return proposal.model_copy(update={"tools": tools})
 
 
 def load_profile(home: str | os.PathLike[str]) -> Profile | None:
@@ -1076,7 +1324,7 @@ def verify_session_profile(
     session: Any,
     *,
     server: str,
-    account_id: str,
+    account_id: str | None,
     confirmation_recorded: bool,
 ) -> VerifiedSessionProfile:
     """Bind an open session only after its complete inventory matches per tool."""
@@ -1135,16 +1383,21 @@ def _proof_of(
         if isinstance(candidate, Sequence) and not isinstance(candidate, str | bytes):
             rows = list(candidate)
             resolved.append("items")
+        elif isinstance(candidate, Mapping):
+            rows = [candidate]
+            resolved.append("items")
         else:
             unresolved["items"] = (
                 f"the broker answer carries no list at {mapping.result['items']!r}"
             )
     scoped_rows = rows
     if rows is not None and "account" in mapping.result:
+        account_path = mapping.result["account"]
         scoped_rows = [
             row
             for row in rows
-            if isinstance(row, Mapping) and str(dig(row, mapping.result["account"])) == account_id
+            if isinstance(row, Mapping)
+            and (account_path == "{account_id}" or str(dig(row, account_path)) == account_id)
         ]
         if not scoped_rows:
             unresolved["account"] = f"no result row is scoped to configured account {account_id}"
@@ -1195,7 +1448,17 @@ def _proof_of(
             if not isinstance(target, Mapping):
                 failures.append("result row is not an object")
                 continue
-            if role in {"price", "cash", "average_cost", "open", "high", "low", "close"}:
+            if path == "{account_id}":
+                value = arguments.get("account_id") or account_id
+            elif role in {
+                "price",
+                "cash",
+                "average_cost",
+                "open",
+                "high",
+                "low",
+                "close",
+            }:
                 value = decimal_at(target, path, role)
             elif role in {"quantity", "volume"}:
                 value = whole_at(target, path, role)

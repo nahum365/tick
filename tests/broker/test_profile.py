@@ -224,7 +224,7 @@ def test_duplicate_tool_names_invalidate_the_whole_session():
         inventory_hash([duplicate, duplicate])
 
 
-def test_order_mapping_requires_the_old_placeholders_and_result_roles():
+def test_person_can_confirm_a_warned_incomplete_order_mapping_for_later_proof():
     place = tool(
         "place_order",
         input_schema={
@@ -238,18 +238,19 @@ def test_order_mapping_requires_the_old_placeholders_and_result_roles():
             "required": ["account", "symbol", "side", "quantity"],
         },
     )
-    with pytest.raises(ValueError, match="different order"):
-        confirmed(
-            place,
-            Category.ORDER_PLACE,
-            arguments={"account": "{account_id}", "symbol": "{symbol}"},
-            result={
-                "order_id": "id",
-                "quantity": "qty",
-                "price": "price",
-                "filled_at": "at",
-            },
-        )
+    mapping = confirmed(
+        place,
+        Category.ORDER_PLACE,
+        arguments={"account": "{account_id}", "symbol": "{symbol}"},
+        result={
+            "order_id": "id",
+            "quantity": "qty",
+            "price": "price",
+            "filled_at": "at",
+        },
+    )
+    assert mapping.arguments == {"account": "{account_id}", "symbol": "{symbol}"}
+    assert not mapping.proved
 
 
 def test_state_table_keeps_new_tools_unmapped_and_exact_tools_callable():

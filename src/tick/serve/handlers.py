@@ -22,19 +22,19 @@ from typing import Any
 from urllib.parse import urlparse
 
 from tick import __version__
-from tick.agents import Provider, availability, is_model_agent
+from tick.agents import ModelAgentError, Provider, availability, is_model_agent
 from tick.auth import FileTokenStorage
 from tick.broker import (
     BrokerError,
-    ProfileProposal,
+    Category,
     ProfileState,
     ProfileTool,
     confirm_profile,
     load_profile,
+    load_proposal,
 )
 from tick.broker.profile import (
     CANONICALIZER_VERSION,
-    CATEGORIZER_VERSION,
     CATEGORY_REGISTRY_VERSION,
     PROFILE_FORMAT_VERSION,
     build_profile,
@@ -99,11 +99,14 @@ __all__ = [
     "approval_decide",
     "approvals",
     "broker_confirm",
+    "broker_account_select",
+    "broker_accounts",
     "broker_connect_complete",
     "broker_connect_start",
     "broker_connect_status",
     "broker_disconnect",
     "broker_profile_diff",
+    "broker_proposal_edit",
     "broker_propose",
     "broker_prove",
     "broker_profile",
@@ -371,6 +374,12 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
             return operations.prove(body)
         if action == "diff":
             return operations.diff()
+        if action == "accounts":
+            return operations.accounts()
+        if action == "account":
+            return operations.select_account(body)
+        if action.startswith("edit:"):
+            return operations.edit(action.removeprefix("edit:"), body)
         raise ValueError(f"unknown broker profile operation {action}")
 
     def build_commons_client() -> CommonsClient:
@@ -1491,7 +1500,21 @@ def broker_profile(context: ServeContext) -> dict[str, Any]:
     profile, error = _profile(context)
     if error is not None:
         raise APIError(409, "broker_profile_invalid", error)
-    return {"profile": profile.model_dump(mode="json") if profile is not None else None}
+    try:
+        proposal = load_proposal(context.home)
+    except BrokerError:
+        proposal = None
+    profile_payload = profile.model_dump(mode="json") if profile is not None else None
+    proposal_payload = proposal.model_dump(mode="json") if proposal is not None else None
+    # Account identifiers are broker credentials for routing purposes.  The box
+    # retains the exact value, while every phone-facing representation is masked.
+    for payload in (profile_payload, proposal_payload):
+        if payload is None:
+            continue
+        account_id = payload.pop("account_id", None)
+        if isinstance(account_id, str):
+            payload["account_id_masked"] = f"••••{account_id[-4:]}"
+    return {"profile": profile_payload, "proposal": proposal_payload}
 
 
 def _browser_viewport(body: Mapping[str, Any]) -> Viewport:
@@ -1680,18 +1703,33 @@ def _broker_profile_operation(
 ) -> dict[str, Any]:
     try:
         return dict(context.broker_profile_operation(action, body))
-    except (BrokerError, ValueError, OSError) as exc:
+    except (BrokerError, ModelAgentError, ValueError, OSError) as exc:
         raise APIError(
             409,
-            f"broker_{action}_refused",
+            f"broker_{action.split(':', 1)[0]}_refused",
             f"{exc} Nothing gained authority; correct it and retry.",
         ) from exc
 
 
 def broker_propose(context: ServeContext, body: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     result = _broker_profile_operation(context, "propose", body)
-    _record_api_mutation(context, "broker", "broker_profile_proposed")
-    return 201, result
+    return 202, result
+
+
+def broker_proposal_edit(
+    context: ServeContext, tool: str, body: Mapping[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    return 200, _broker_profile_operation(context, f"edit:{tool}", body)
+
+
+def broker_accounts(context: ServeContext) -> tuple[int, dict[str, Any]]:
+    return 200, _broker_profile_operation(context, "accounts", {})
+
+
+def broker_account_select(
+    context: ServeContext, body: Mapping[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    return 200, _broker_profile_operation(context, "account", body)
 
 
 def broker_prove(context: ServeContext, body: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -1748,9 +1786,8 @@ def broker_confirm(context: ServeContext, body: Mapping[str, Any]) -> tuple[int,
             "broker_confirm_invalid",
             "fixed must be an object keyed by exact broker argument names. Correct it and retry.",
         )
-    proposal_path = context.home / "broker" / "proposal.json"
     try:
-        proposal = ProfileProposal.model_validate_json(proposal_path.read_text(encoding="utf-8"))
+        proposal = load_proposal(context.home)
     except (OSError, ValueError) as exc:
         raise APIError(
             409,
@@ -1775,6 +1812,13 @@ def broker_confirm(context: ServeContext, body: Mapping[str, Any]) -> tuple[int,
             f"tool {tool!r} is deterministically denied and cannot be confirmed. "
             "Choose a callable tool.",
         )
+    if proposal.account_id is None and proposed.category is not Category.READ_ACCOUNTS:
+        raise APIError(
+            409,
+            "broker_account_required",
+            "Finalize read.accounts and choose an eligible masked account before finalizing "
+            "another tool.",
+        )
     existing = load_profile(context.home)
     confirmed: dict[str, ProfileTool] = {}
     for name, candidate in proposal.tools.items():
@@ -1789,7 +1833,7 @@ def broker_confirm(context: ServeContext, body: Mapping[str, Any]) -> tuple[int,
                 mapping_hash=mapping_hash(category, {}, {}),
                 confirmed_at=None,
                 confirmed_by=None,
-                categorizer_version=CATEGORIZER_VERSION,
+                categorizer_version=proposal.categorizer_version,
                 proved_contract_hash=None,
                 proved_mapping_hash=None,
                 proved_at=None,
@@ -1817,7 +1861,7 @@ def broker_confirm(context: ServeContext, body: Mapping[str, Any]) -> tuple[int,
                 mapping_hash=mapping_hash(category, arguments, candidate.result),
                 confirmed_at=_aware(context.now()),
                 confirmed_by="api",
-                categorizer_version=CATEGORIZER_VERSION,
+                categorizer_version=proposal.categorizer_version,
                 proved_contract_hash=None,
                 proved_mapping_hash=None,
                 proved_at=None,

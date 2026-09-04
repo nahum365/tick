@@ -167,7 +167,8 @@ def test_status_on_a_bare_machine_says_what_to_run(home: Path):
     result = invoke("broker", "status")
 
     assert "grant: none" in result.output
-    assert "tick broker propose --account" in result.output
+    assert "run: tick broker propose" in result.output
+    assert "--account" not in result.output
 
 
 def test_profile_ceremony_never_bulk_confirms_an_order(connected: FileTokenStorage, home: Path):

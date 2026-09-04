@@ -266,6 +266,11 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
             return 200, handlers.broker_profile_diff(context)
         if method == "POST" and path == "/v1/broker/propose":
             return handlers.broker_propose(context, self._body())
+        if method == "POST" and path == "/v1/broker/accounts":
+            self._require_empty_body()
+            return handlers.broker_accounts(context)
+        if method == "POST" and path == "/v1/broker/account":
+            return handlers.broker_account_select(context, self._body())
         if method == "POST" and path == "/v1/broker/prove":
             return handlers.broker_prove(context, self._body())
         if method == "POST" and path == "/v1/broker/disconnect":
@@ -281,6 +286,8 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
             return handlers.doctor_ack_demotion(context, self._body())
 
         pieces = [piece for piece in path.split("/") if piece]
+        if len(pieces) == 4 and pieces[:3] == ["v1", "broker", "proposal"] and method == "POST":
+            return handlers.broker_proposal_edit(context, pieces[3], self._body())
         if (
             len(pieces) == 5
             and pieces[:4] == ["v1", "provider", "codex", "login"]

@@ -475,10 +475,28 @@ def test_broker_profile_operations_reuse_the_injected_box_boundary(server_box):
         "POST",
         "/v1/broker/propose",
         secret=secret,
-        body={"account": "account-placeholder", "server_url": "https://agent.robinhood.com"},
+        body={"server_url": "https://agent.robinhood.com"},
     )
-    assert status == 201
+    assert status == 202
     assert proposed["action"] == "propose"
+    status, edited = request(
+        server,
+        "POST",
+        "/v1/broker/proposal/get_accounts",
+        secret=secret,
+        body={"category": "read.accounts"},
+    )
+    assert status == 200 and edited["action"] == "edit:get_accounts"
+    status, accounts = request(server, "POST", "/v1/broker/accounts", secret=secret, body=None)
+    assert status == 200 and accounts["action"] == "accounts"
+    status, selected = request(
+        server,
+        "POST",
+        "/v1/broker/account",
+        secret=secret,
+        body={"account_ref": "acct_fixture"},
+    )
+    assert status == 200 and selected["action"] == "account"
     status, proven = request(
         server, "POST", "/v1/broker/prove", secret=secret, body={"probe": {"symbol": "XYZ"}}
     )
