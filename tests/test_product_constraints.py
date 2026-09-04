@@ -135,6 +135,8 @@ PROCESS_MODULES = (
     *CLI_ADAPTER_MODULES,
     "serve/doctor.py",  # doctor asks the installed provider CLI for login status
     "serve/handlers.py",
+    # The browser bridge starts only the reviewed local Xvfb/Chrome/maim/xdotool processes.
+    "serve/browser_bridge.py",
     "serve/provider_login.py",  # supervises the provider's device-login command
 )
 

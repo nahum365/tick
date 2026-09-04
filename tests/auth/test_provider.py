@@ -30,6 +30,7 @@ def a_loopback() -> LoopbackAuthorization:
         open_browser=False,
         announce=lambda line: None,
         redirect_uri_override=None,
+        on_callback=None,
     )
 
 

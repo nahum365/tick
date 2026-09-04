@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -83,6 +84,7 @@ from tick.runtime import (
 )
 from tick.spec import SpecError
 
+from .browser_bridge import BrowserBridge, BrowserBridgeError, Viewport
 from .codex_install import default_fetch, install_codex
 from .pairing import rotate_secret
 from .recovery import DigitalOceanMetadata, MetadataPort, recovery_tag
@@ -105,6 +107,10 @@ __all__ = [
     "broker_propose",
     "broker_prove",
     "broker_profile",
+    "browser_close",
+    "browser_frames",
+    "browser_input",
+    "browser_session_start",
     "chat_create",
     "chat_delete",
     "chat_get",
@@ -135,6 +141,7 @@ __all__ = [
     "pair_rotate",
     "purge",
     "provider_login_start",
+    "provider_browser_login_start",
     "provider_login_status",
     "status",
     "stop",
@@ -214,11 +221,14 @@ class ServeContext:
         [Provider, str | None, tuple[ChatTurn, ...], str], Iterable[Mapping[str, Any]]
     ]
     provider_login_start: Callable[[], Mapping[str, str]]
+    provider_browser_login_start: Callable[[Viewport], Mapping[str, str]]
     provider_login_status: Callable[[str], Mapping[str, str]]
     codex_install: Callable[[], Mapping[str, str]]
     broker_connect_start: Callable[[str | None, str | None], Mapping[str, Any]]
     broker_connect_complete: Callable[[str, str], Mapping[str, Any]]
     broker_connect_status: Callable[[str], Mapping[str, Any]]
+    browser_ceremony_url: Callable[[str], str | None]
+    browser_bridge: BrowserBridge
     broker_profile_operation: Callable[[str, Mapping[str, Any]], Mapping[str, Any]]
     commons_client: Callable[[], CommonsClient]
     metadata: MetadataPort
@@ -249,7 +259,9 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
 
     context: ServeContext
     login_manager = None
+    browser_login_manager = None
     connect_manager = None
+    browser_bridge = BrowserBridge.for_environment(home=home)
 
     def start_login() -> Mapping[str, str]:
         nonlocal login_manager
@@ -261,6 +273,12 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
     def login_status(login_id: str) -> Mapping[str, str]:
         from .provider_login import ProviderLoginError
 
+        if browser_login_manager is not None:
+            try:
+                return browser_login_manager.status(login_id)
+            except ProviderLoginError as exc:
+                if exc.code != "CODEX_LOGIN_NOT_FOUND":
+                    raise
         if login_manager is None:
             raise ProviderLoginError(
                 "CODEX_LOGIN_NOT_FOUND",
@@ -268,11 +286,23 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
             )
         return login_manager.status(login_id)
 
+    def start_browser_login(viewport: Viewport) -> Mapping[str, str]:
+        nonlocal browser_login_manager
+        from .provider_login import ProviderBrowserLoginManager
+
+        browser_login_manager = ProviderBrowserLoginManager.for_environment(bridge=browser_bridge)
+        return browser_login_manager.start(viewport)
+
     def start_connect(server_url: str | None, redirect_scheme: str | None) -> Mapping[str, Any]:
         nonlocal connect_manager
         from .broker_connect import BrokerConnectManager
 
-        connect_manager = BrokerConnectManager.for_environment(home=home)
+        connect_manager = BrokerConnectManager.for_environment(
+            home=home,
+            callback_received=lambda: browser_bridge.close_active(
+                purpose="broker_connect", reason="callback_received"
+            ),
+        )
         return connect_manager.start(server_url, redirect_scheme)
 
     def complete_connect(connect_id: str, redirect_url: str) -> Mapping[str, Any]:
@@ -294,6 +324,19 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
                 f"connection {connect_id} is not active. Start the broker connection again.",
             )
         return connect_manager.status(connect_id)
+
+    def ceremony_url(purpose: str) -> str | None:
+        if purpose == "broker_connect":
+            return (
+                connect_manager.active_authorization_url() if connect_manager is not None else None
+            )
+        if purpose == "provider_login":
+            return (
+                browser_login_manager.active_authorization_url()
+                if browser_login_manager is not None
+                else None
+            )
+        return None
 
     def profile_operation(action: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
         from .broker_ops import BrokerOperations
@@ -359,11 +402,14 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         unit_fragments=systemd_unit_fragments,
         chat_adapter=run_chat,
         provider_login_start=start_login,
+        provider_browser_login_start=start_browser_login,
         provider_login_status=login_status,
         codex_install=lambda: install_codex(home, fetch=default_fetch),
         broker_connect_start=start_connect,
         broker_connect_complete=complete_connect,
         broker_connect_status=connect_status,
+        browser_ceremony_url=ceremony_url,
+        browser_bridge=browser_bridge,
         broker_profile_operation=profile_operation,
         commons_client=build_commons_client,
         metadata=DigitalOceanMetadata(),
@@ -1423,6 +1469,128 @@ def broker_profile(context: ServeContext) -> dict[str, Any]:
     if error is not None:
         raise APIError(409, "broker_profile_invalid", error)
     return {"profile": profile.model_dump(mode="json") if profile is not None else None}
+
+
+def _browser_viewport(body: Mapping[str, Any]) -> Viewport:
+    viewport = body.get("viewport")
+    if not isinstance(viewport, Mapping) or set(viewport) != {"width", "height"}:
+        raise APIError(
+            400,
+            "BROWSER_VIEWPORT_INVALID",
+            "viewport must contain integer width and height. Send the phone's visible frame "
+            "size and retry.",
+        )
+    try:
+        return Viewport(width=viewport["width"], height=viewport["height"])
+    except (BrowserBridgeError, TypeError) as exc:
+        reason = exc.reason if isinstance(exc, BrowserBridgeError) else str(exc)
+        raise APIError(400, "BROWSER_VIEWPORT_INVALID", reason) from exc
+
+
+def _browser_error(exc: BrowserBridgeError, *, status: int = 409) -> APIError:
+    return APIError(status, exc.code, exc.reason)
+
+
+def browser_session_start(
+    context: ServeContext, body: Mapping[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    if set(body) != {"url", "viewport", "purpose"} or not isinstance(body.get("url"), str):
+        raise APIError(
+            400,
+            "BROWSER_SESSION_INVALID",
+            "send url, viewport, and purpose from the active ceremony. Start that ceremony "
+            "again if they are unavailable.",
+        )
+    purpose = body.get("purpose")
+    if purpose not in {"broker_connect", "provider_login"}:
+        raise APIError(
+            400,
+            "BROWSER_PURPOSE_INVALID",
+            "purpose must be broker_connect or provider_login. Start that ceremony and retry.",
+        )
+    url = str(body["url"])
+    active_url = context.browser_ceremony_url(str(purpose))
+    requested_host = urlparse(url).hostname
+    active_host = urlparse(active_url).hostname if active_url is not None else None
+    if requested_host is None or requested_host != active_host:
+        raise APIError(
+            409,
+            "BROWSER_URL_NOT_A_CEREMONY",
+            "the URL host was not produced by this box's active ceremony. Start the provider "
+            "or broker ceremony again and open the URL it returns.",
+        )
+    try:
+        opened = context.browser_bridge.open(url, _browser_viewport(body), str(purpose))
+    except BrowserBridgeError as exc:
+        raise _browser_error(exc) from exc
+    return 201, opened
+
+
+def browser_frames(context: ServeContext, session_id: str) -> Iterable[dict[str, Any]]:
+    if not context.browser_bridge.knows(session_id):
+        raise APIError(
+            404,
+            "BROWSER_SESSION_NOT_FOUND",
+            "that browser session is not active. Start the ceremony again if you still need "
+            "its browser.",
+        )
+
+    def generate() -> Iterable[dict[str, Any]]:
+        for t_ms, jpeg, origin in context.browser_bridge.frames(session_id):
+            yield {
+                "t": t_ms,
+                "jpeg": base64.b64encode(jpeg).decode("ascii"),
+                "origin": origin,
+                "done": False,
+            }
+        yield {"done": True, "reason": context.browser_bridge.close_reason(session_id)}
+
+    return generate()
+
+
+def browser_input(
+    context: ServeContext, session_id: str, body: Mapping[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    if set(body) != {"events"} or not isinstance(body.get("events"), list):
+        raise APIError(
+            400,
+            "BROWSER_EVENTS_REQUIRED",
+            "events must be a list of browser inputs. Send the gesture again.",
+        )
+    try:
+        context.browser_bridge.input(session_id, body["events"])
+    except BrowserBridgeError as exc:
+        raise _browser_error(
+            exc, status=404 if exc.code == "BROWSER_SESSION_NOT_FOUND" else 400
+        ) from exc
+    return 202, {"accepted": len(body["events"])}
+
+
+def browser_close(context: ServeContext, session_id: str) -> tuple[int, dict[str, Any]]:
+    try:
+        context.browser_bridge.close(session_id, "user_closed")
+    except BrowserBridgeError as exc:
+        raise _browser_error(exc, status=404) from exc
+    return 200, {"session_id": session_id, "reason": "user_closed"}
+
+
+def provider_browser_login_start(
+    context: ServeContext, body: Mapping[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    if set(body) != {"viewport"}:
+        raise APIError(
+            400,
+            "BROWSER_VIEWPORT_INVALID",
+            "browser login requires the phone's viewport. Send its visible frame size and retry.",
+        )
+    from .provider_login import ProviderLoginError
+
+    try:
+        result = dict(context.provider_browser_login_start(_browser_viewport(body)))
+    except ProviderLoginError as exc:
+        raise APIError(409, exc.code, exc.reason) from exc
+    _record_api_mutation(context, "provider", "provider_browser_login_started")
+    return 202, result
 
 
 def broker_connect_start(

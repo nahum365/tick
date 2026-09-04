@@ -81,6 +81,33 @@ def server_box(box_home: Path):
 
     commons_client = FakeCommonsClient()
 
+    class FakeBrowserBridge:
+        def __init__(self):
+            self.closed = {}
+            self.inputs = []
+
+        def open(self, url, viewport, purpose):
+            self.opened = (url, viewport, purpose)
+            return {"session_id": "browser-1", "origin": "https://login.example.invalid"}
+
+        def knows(self, session_id):
+            return session_id == "browser-1"
+
+        def frames(self, session_id):
+            assert session_id == "browser-1"
+            yield 1234, b"fixture-jpeg", "https://login.example.invalid"
+
+        def close_reason(self, session_id):
+            return self.closed.get(session_id, "callback_received")
+
+        def input(self, session_id, events):
+            self.inputs.append((session_id, events))
+
+        def close(self, session_id, reason):
+            self.closed[session_id] = reason
+
+    browser_bridge = FakeBrowserBridge()
+
     def start(argv):
         started.append(list(argv))
         running.add(7001)
@@ -107,6 +134,11 @@ def server_box(box_home: Path):
             "code": "ABCD-WXYZ",
             "expires_at": "2026-09-03T12:15:00Z",
         },
+        provider_browser_login_start=lambda viewport: {
+            "login_id": "login-browser-1",
+            "session_id": "browser-1",
+            "origin": "https://login.example.invalid",
+        },
         provider_login_status=lambda login_id: {"login_id": login_id, "state": "pending"},
         codex_install=lambda: {
             "code": "CODEX_INSTALLED",
@@ -129,6 +161,8 @@ def server_box(box_home: Path):
             "connect_id": connect_id,
             "state": "pending",
         },
+        browser_ceremony_url=lambda _purpose: "https://login.example.invalid/authorize?state=test",
+        browser_bridge=browser_bridge,
         broker_profile_operation=lambda action, body: {"action": action, "body": dict(body)},
         commons_client=lambda: commons_client,
         metadata=type("FixtureMetadata", (), {"tags": lambda self: frozenset()})(),

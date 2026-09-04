@@ -34,6 +34,7 @@ def test_proposal_tool_records_intent_but_never_executes_it(tmp_path):
         unit_fragments=lambda: (True, "ok", ("paper",)),
         chat_adapter=lambda _provider, _model, _transcript, _frame: (),
         provider_login_start=lambda: {},
+        provider_browser_login_start=lambda _viewport: {},
         provider_login_status=lambda _login_id: {},
         codex_install=lambda: {
             "code": "CODEX_INSTALLED",
@@ -45,6 +46,8 @@ def test_proposal_tool_records_intent_but_never_executes_it(tmp_path):
         broker_connect_start=lambda _server, _scheme: {},
         broker_connect_complete=lambda _connect_id, _url: {},
         broker_connect_status=lambda _connect_id: {},
+        browser_ceremony_url=lambda _purpose: None,
+        browser_bridge=object(),
         broker_profile_operation=lambda _action, _body: {},
         commons_client=lambda: object(),  # type: ignore[return-value]
         metadata=type("FixtureMetadata", (), {"tags": lambda self: frozenset()})(),

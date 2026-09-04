@@ -49,15 +49,19 @@ class BrokerConnectManager:
         session_factory: Callable[
             [str, FileTokenStorage, LoopbackAuthorization, float], MCPSession
         ],
+        callback_received: Callable[[], None],
     ) -> None:
         self._home = home
         self._timeout = timeout_seconds
         self._announce_wait = announce_wait_seconds
         self._session_factory = session_factory
+        self._callback_received = callback_received
         self._connects: dict[str, _Connect] = {}
 
     @classmethod
-    def for_environment(cls, *, home) -> BrokerConnectManager:
+    def for_environment(
+        cls, *, home, callback_received: Callable[[], None]
+    ) -> BrokerConnectManager:
         def session_factory(server, storage, loopback, timeout):
             provider = build_oauth_provider(server_url=server, storage=storage, loopback=loopback)
             return MCPSession(streamable_http_session(server, provider), timeout_seconds=timeout)
@@ -67,6 +71,7 @@ class BrokerConnectManager:
             timeout_seconds=300.0,
             announce_wait_seconds=10.0,
             session_factory=session_factory,
+            callback_received=callback_received,
         )
 
     def start(self, server_url: str | None, redirect_scheme: str | None) -> dict[str, object]:
@@ -88,6 +93,7 @@ class BrokerConnectManager:
             redirect_uri_override=(
                 f"{redirect_scheme}://broker/callback" if redirect_scheme else None
             ),
+            on_callback=self._callback_received,
         )
         loopback.__enter__()
         connect_id = secrets.token_hex(10)
@@ -156,3 +162,10 @@ class BrokerConnectManager:
             "reason": item.reason,
             "tools_discovered": item.tools,
         }
+
+    def active_authorization_url(self) -> str | None:
+        """Return only the latest pending URL so the bridge cannot become a browser."""
+        for item in reversed(tuple(self._connects.values())):
+            if item.state == "pending" and item.loopback.authorization_url is not None:
+                return item.loopback.authorization_url
+        return None

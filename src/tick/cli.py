@@ -2213,6 +2213,7 @@ def _with_broker_session(
         open_browser=open_browser,
         announce=typer.echo,
         redirect_uri_override=None,
+        on_callback=None,
     )
     loopback.__enter__()
     try:

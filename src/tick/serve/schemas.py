@@ -15,6 +15,24 @@ class ErrorResponse(TypedDict):
     reason: str
 
 
+class BrowserViewport(TypedDict):
+    width: int
+    height: int
+
+
+class BrowserSessionResponse(TypedDict):
+    session_id: str
+    origin: str
+
+
+class BrowserFrame(TypedDict):
+    done: bool
+    t: NotRequired[int]
+    jpeg: NotRequired[str]
+    origin: NotRequired[str]
+    reason: NotRequired[str]
+
+
 class ProviderAvailability(TypedDict):
     available: bool
 

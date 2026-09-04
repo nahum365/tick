@@ -6,7 +6,7 @@ import hmac
 import json
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -27,7 +27,7 @@ MAX_BODY_BYTES = 64 * 1024
 class JSONLines:
     """A completed turn rendered with the streaming wire grammar."""
 
-    chunks: tuple[dict[str, Any], ...]
+    chunks: Iterable[dict[str, Any]]
 
 
 class FailureLimiter:
@@ -172,6 +172,10 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/v1/provider/codex/login":
             self._require_empty_body()
             return handlers.provider_login_start(context)
+        if method == "POST" and path == "/v1/provider/codex/login/browser":
+            return handlers.provider_browser_login_start(context, self._body())
+        if method == "POST" and path == "/v1/browser/sessions":
+            return handlers.browser_session_start(context, self._body())
         if method == "POST" and path == "/v1/provider/codex/install":
             self._require_empty_body()
             return handlers.provider_codex_install(context)
@@ -286,6 +290,15 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
         if len(pieces) == 4 and pieces[:3] == ["v1", "broker", "connect"]:
             if method == "GET":
                 return 200, handlers.broker_connect_status(context, pieces[3])
+        if len(pieces) == 5 and pieces[:3] == ["v1", "browser", "sessions"]:
+            session_id, action = pieces[3], pieces[4]
+            if method == "GET" and action == "frames":
+                return 200, JSONLines(handlers.browser_frames(context, session_id))
+            if method == "POST" and action == "input":
+                return handlers.browser_input(context, session_id, self._body())
+        if len(pieces) == 4 and pieces[:3] == ["v1", "browser", "sessions"] and method == "DELETE":
+            self._require_empty_body()
+            return handlers.browser_close(context, pieces[3])
         if (
             len(pieces) == 5
             and pieces[:3] == ["v1", "broker", "connect"]
@@ -423,7 +436,7 @@ class BoxRequestHandler(BaseHTTPRequestHandler):
         for chunk in payload.chunks:
             line = (
                 json.dumps(
-                    normalize_payload(chunk, where="chat stream"),
+                    normalize_payload(chunk, where="JSON-line stream"),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8")
@@ -465,4 +478,5 @@ def serve(
     try:
         server.serve_forever()
     finally:
+        context.browser_bridge.shutdown()
         server.server_close()

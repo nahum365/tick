@@ -34,6 +34,7 @@ def context(home, metadata: Metadata) -> ServeContext:
         unit_fragments=lambda: (True, "ok", ("paper",)),
         chat_adapter=lambda _provider, _model, _transcript, _frame: (),
         provider_login_start=lambda: {},
+        provider_browser_login_start=lambda _viewport: {},
         provider_login_status=lambda _login: {},
         codex_install=lambda: {
             "code": "CODEX_INSTALLED",
@@ -45,6 +46,8 @@ def context(home, metadata: Metadata) -> ServeContext:
         broker_connect_start=lambda _server, _scheme: {},
         broker_connect_complete=lambda _connect, _url: {},
         broker_connect_status=lambda _connect: {},
+        browser_ceremony_url=lambda _purpose: None,
+        browser_bridge=object(),
         broker_profile_operation=lambda _action, _body: {},
         commons_client=lambda: object(),  # type: ignore[return-value]
         metadata=metadata,

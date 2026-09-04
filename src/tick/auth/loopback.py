@@ -126,6 +126,7 @@ class LoopbackAuthorization:
         open_browser: bool,
         announce: Callable[[str], None],
         redirect_uri_override: str | None,
+        on_callback: Callable[[], None] | None,
     ) -> None:
         """`redirect_uri_override` registers a non-loopback redirect (a phone's own URL
         scheme, e.g. `tick://broker/callback`) while the state check and code handling
@@ -147,6 +148,8 @@ class LoopbackAuthorization:
         self._timeout = timeout_seconds
         self._open_browser = open_browser
         self._announce = announce
+        self._on_callback = on_callback
+        self._callback_announced = False
         self._server: _CallbackServer | None = None
         self._expected_state: str | None = None
         #: The authorization URL that was announced, for the CLI to report.
@@ -234,7 +237,9 @@ class LoopbackAuthorization:
                 f"Nothing was authorised and nothing was written; run the connect "
                 f"command again when you are ready to finish it in the browser."
             )
-        return self._accept(captured)
+        result = self._accept(captured)
+        self._notify_callback()
+        return result
 
     def complete_redirect_url(self, redirect_url: str) -> None:
         """Hand the phone-captured loopback redirect to the same state-checking path."""
@@ -268,6 +273,13 @@ class LoopbackAuthorization:
         # Validate before waking the OAuth callback. A mismatched code is never retained.
         self._accept(captured)
         server.captured = captured
+        self._notify_callback()
+
+    def _notify_callback(self) -> None:
+        """Close a related pixel stream once this exact callback has passed state checks."""
+        if not self._callback_announced and self._on_callback is not None:
+            self._callback_announced = True
+            self._on_callback()
 
     def _accept(self, captured: dict[str, str]) -> AuthorizationCodeResult:
         """Turn a captured redirect into a result, or refuse it."""

@@ -33,6 +33,7 @@ def loopback(announce=None, *, open_browser: bool = False) -> LoopbackAuthorizat
         open_browser=open_browser,
         announce=announce if announce is not None else (lambda line: None),
         redirect_uri_override=None,
+        on_callback=None,
     )
 
 
@@ -161,6 +162,7 @@ def test_a_wait_that_times_out_says_nothing_was_authorised():
         open_browser=False,
         announce=lambda line: None,
         redirect_uri_override=None,
+        on_callback=None,
     )
     with auth:
         with pytest.raises(CallbackError) as caught:
@@ -209,6 +211,7 @@ def test_an_impossible_port_is_refused(port: int):
             open_browser=False,
             announce=lambda line: None,
             redirect_uri_override=None,
+            on_callback=None,
         )
 
 
@@ -220,17 +223,20 @@ def test_a_non_positive_timeout_is_refused():
             open_browser=False,
             announce=lambda line: None,
             redirect_uri_override=None,
+            on_callback=None,
         )
 
 
 def test_a_custom_scheme_override_is_registered_and_accepted_on_completion():
     """The phone app cannot intercept http://127.0.0.1; it registers tick://broker/callback."""
+    callbacks = []
     with LoopbackAuthorization(
         port=0,
         timeout_seconds=5.0,
         open_browser=False,
         announce=lambda _line: None,
         redirect_uri_override="tick://broker/callback",
+        on_callback=lambda: callbacks.append("received"),
     ) as auth:
         assert auth.redirect_uri == "tick://broker/callback"
         auth._expected_state = "st4te"
@@ -238,6 +244,7 @@ def test_a_custom_scheme_override_is_registered_and_accepted_on_completion():
         assert auth._server.captured == {"code": "c0de", "state": "st4te"}
         with pytest.raises(CallbackError):
             auth.complete_redirect_url("http://127.0.0.1:1/tick/callback?code=x&state=st4te")
+    assert callbacks == ["received"]
 
 
 def test_an_override_that_is_not_a_custom_scheme_url_is_refused():
@@ -248,4 +255,5 @@ def test_an_override_that_is_not_a_custom_scheme_url_is_refused():
             open_browser=False,
             announce=lambda _line: None,
             redirect_uri_override="https://evil.example.invalid/callback?x=",
+            on_callback=None,
         )

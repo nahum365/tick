@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import IO, Protocol
 
-__all__ = ["ProviderLoginError", "ProviderLoginManager"]
+from .browser_bridge import BrowserBridge, BrowserBridgeError, Viewport
+
+__all__ = ["ProviderBrowserLoginManager", "ProviderLoginError", "ProviderLoginManager"]
 
 # Codex colours its output even when piped; strip escapes before reading it.
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -180,3 +182,133 @@ class ProviderLoginManager:
         if state == "failed":
             payload["reason"] = login.error or "codex login failed; run it locally for details."
         return payload
+
+
+@dataclass(slots=True)
+class _BrowserLogin:
+    process: Process
+    url: str
+    session_id: str
+    error: str | None
+
+
+class ProviderBrowserLoginManager:
+    """Run Codex's browser login while a person drives its page on the box."""
+
+    def __init__(
+        self,
+        *,
+        binary: str,
+        start_process: Callable[[Sequence[str]], Process],
+        bridge: BrowserBridge,
+        capture_timeout_seconds: float,
+    ) -> None:
+        self._binary = binary
+        self._start_process = start_process
+        self._bridge = bridge
+        self._capture_timeout = capture_timeout_seconds
+        self._logins: dict[str, _BrowserLogin] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def for_environment(cls, *, bridge: BrowserBridge) -> ProviderBrowserLoginManager:
+        binary = shutil.which("codex")
+        if binary is None:
+            raise ProviderLoginError(
+                "CODEX_NOT_INSTALLED",
+                "install the `codex` command on the box, then start browser login again.",
+            )
+
+        def start(argv: Sequence[str]) -> Process:
+            return subprocess.Popen(  # noqa: S603
+                list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+
+        return cls(
+            binary=binary,
+            start_process=start,
+            bridge=bridge,
+            capture_timeout_seconds=10.0,
+        )
+
+    def start(self, viewport: Viewport) -> dict[str, str]:
+        process = self._start_process([self._binary, "login"])
+        url, captured_error = self._capture_url(process)
+        if url is None:
+            raise ProviderLoginError(
+                "CODEX_LOGIN_OUTPUT_UNREADABLE",
+                f"{captured_error or 'codex did not print a browser login URL'}. Run `codex "
+                "login` on the box and retry there.",
+            )
+        login_id = secrets.token_hex(10)
+        try:
+            opened = self._bridge.open(url, viewport, "provider_login")
+        except BrowserBridgeError as exc:
+            raise ProviderLoginError(exc.code, exc.reason) from exc
+        login = _BrowserLogin(
+            process=process,
+            url=url,
+            session_id=opened["session_id"],
+            error=captured_error,
+        )
+        with self._lock:
+            self._logins[login_id] = login
+        threading.Thread(
+            target=self._watch,
+            args=(login,),
+            name=f"tick-codex-login-{login_id}",
+            daemon=True,
+        ).start()
+        return {**opened, "login_id": login_id}
+
+    def status(self, login_id: str) -> dict[str, str]:
+        with self._lock:
+            login = self._logins.get(login_id)
+        if login is None:
+            raise ProviderLoginError(
+                "CODEX_LOGIN_NOT_FOUND",
+                f"login {login_id} is not active. Start browser login again.",
+            )
+        result = login.process.poll()
+        state = "pending" if result is None else ("succeeded" if result == 0 else "failed")
+        payload = {"login_id": login_id, "state": state}
+        if state == "failed":
+            payload["reason"] = login.error or "codex login failed; run it locally for details."
+        return payload
+
+    def active_authorization_url(self) -> str | None:
+        with self._lock:
+            for login in reversed(tuple(self._logins.values())):
+                if login.process.poll() is None:
+                    return login.url
+        return None
+
+    def _capture_url(self, process: Process) -> tuple[str | None, str | None]:
+        text = ""
+        lines: queue.Queue[str] = queue.Queue()
+
+        def copy(stream: IO[str]) -> None:
+            for line in stream:
+                lines.put(line)
+
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                threading.Thread(target=copy, args=(stream,), daemon=True).start()
+        deadline = time.monotonic() + self._capture_timeout
+        while time.monotonic() < deadline:
+            try:
+                text += "\n" + lines.get(timeout=0.05)
+            except queue.Empty:
+                pass
+            clean = _ANSI.sub("", text)
+            found = _URL.search(clean)
+            if found:
+                return found.group(0).rstrip(".,"), None
+        error = " ".join(_ANSI.sub("", text).split())[-500:]
+        return None, error or None
+
+    def _watch(self, login: _BrowserLogin) -> None:
+        while (result := login.process.poll()) is None:
+            time.sleep(0.1)
+        reason = "login_succeeded" if result == 0 else "login_failed"
+        self._bridge.close(login.session_id, reason)
