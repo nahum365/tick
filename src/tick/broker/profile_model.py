@@ -10,6 +10,7 @@ advertisements and unfamiliar community servers should remain reviewable.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -78,12 +79,35 @@ _RESULT_MEANINGS: Mapping[str, str] = {
 
 
 def _reply_schema() -> Mapping[str, Any]:
-    argument_value = {
-        "oneOf": [
-            {"type": ["string", "number", "integer", "boolean", "null"]},
-            {"type": "array"},
-            {"type": "object"},
+    """The strict document the provider fills in.
+
+    Codex forwards this as a strict response schema, which permits `anyOf` but
+    not `oneOf`, requires `additionalProperties: false` on every object and
+    every property listed in `required`. Open maps are therefore expressed as
+    arrays of pairs (`bindings`, `paths`) and folded back into mappings by
+    `_normalize_payload` before validation. Live 2026-09-04: the earlier shape
+    was refused with "'oneOf' is not permitted" before any proposal was made.
+    """
+    scalar_or_list = {
+        "anyOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "null"},
+            {"type": "array", "items": {"type": "string"}},
         ]
+    }
+    binding = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"input": {"type": "string"}, "value": scalar_or_list},
+        "required": ["input", "value"],
+    }
+    path = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"role": {"type": "string"}, "path": {"type": "string"}},
+        "required": ["role", "path"],
     }
     return {
         "name": MODEL_PROPOSAL_TOOL,
@@ -100,28 +124,76 @@ def _reply_schema() -> Mapping[str, Any]:
                         "properties": {
                             "name": {"type": "string"},
                             "category": {
-                                "oneOf": [
+                                "anyOf": [
                                     {"type": "string", "enum": [item.value for item in Category]},
                                     {"type": "null"},
                                 ]
                             },
-                            "arguments": {
-                                "type": "object",
-                                "additionalProperties": argument_value,
-                            },
-                            "result": {
-                                "type": "object",
-                                "additionalProperties": {"type": "string"},
-                            },
+                            "bindings": {"type": "array", "items": binding},
+                            "paths": {"type": "array", "items": path},
                             "reason": {"type": "string"},
                         },
-                        "required": ["name", "category", "arguments", "result", "reason"],
+                        "required": ["name", "category", "bindings", "paths", "reason"],
                     },
                 }
             },
             "required": ["tools"],
         },
     }
+
+
+def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Fold the strict array-of-pairs document into the mapping form Tick keeps.
+
+    Accepts both shapes: a recorded reply may already carry `arguments` and
+    `result` maps; a live strict reply carries `bindings` and `paths`.
+    """
+    tools_out: list[Any] = []
+    for row in payload.get("tools", ()):
+        if not isinstance(row, Mapping):
+            tools_out.append(row)
+            continue
+        item = dict(row)
+        if "bindings" in item and "arguments" not in item:
+            pairs = item.pop("bindings")
+            item["arguments"] = {
+                str(pair.get("input")): pair.get("value")
+                for pair in pairs
+                if isinstance(pair, Mapping)
+            }
+        if "paths" in item and "result" not in item:
+            pairs = item.pop("paths")
+            item["result"] = {
+                str(pair.get("role")): str(pair.get("path"))
+                for pair in pairs
+                if isinstance(pair, Mapping)
+            }
+        if isinstance(item.get("result"), Mapping):
+            item["result"] = _row_relative(dict(item["result"]))
+        tools_out.append(item)
+    return {**{k: v for k, v in payload.items() if k != "tools"}, "tools": tools_out}
+
+
+def _row_relative(result: dict[str, str]) -> dict[str, str]:
+    """Rewrite per-row role paths the model wrote from the answer's root.
+
+    The broker port reads every role other than `items` relative to one row of
+    `items` (`symbol`, not `data.positions.0.symbol`). Live 2026-09-04: the
+    model wrote root-anchored row paths for every list read, which the checker
+    then flagged as unresolvable. The rewrite is exact (the items path plus one
+    index), so no meaning is guessed; anything else is left for the person.
+    """
+    items = result.get("items")
+    if not items:
+        return result
+    rewritten: dict[str, str] = {}
+    for role, path in result.items():
+        if role != "items":
+            match = re.match(re.escape(items) + r"\.\d+\.(.+)\Z", path)
+            if match is not None:
+                path = match.group(1)
+        rewritten[role] = path
+    return rewritten
 
 
 def _prompt(contracts: Sequence[ToolContract]) -> str:
@@ -154,7 +226,14 @@ def _prompt(contracts: Sequence[ToolContract]) -> str:
             "denied category.",
             "Order mappings are long-only: buy opens or adds; sell only closes quantity "
             "already held.",
+            "Answer one row per advertised tool: bindings is the list of {input, value} "
+            "pairs for that tool's inputs (value is a {placeholder}, a literal, or an "
+            "array of strings); paths is the list of {role, path} pairs naming where each "
+            "result role lives in the tool's output.",
             "Use dotted output paths; integer path segments select array entries.",
+            "When a category has an items role, every other role path is relative to "
+            "one row of items: items=data.positions and symbol=symbol, never "
+            "symbol=data.positions.0.symbol.",
             'Array inputs may wrap a placeholder, for example ["{symbol}"].',
             "A result role may be {account_id} when the broker omits the account it was sent.",
             "An items path may resolve to one object, which Tick treats as a one-row list.",
@@ -199,7 +278,9 @@ class ModelCategorizer(Categorizer):
                 f"{MODEL_PROPOSAL_TOOL!r}. Nothing gained authority; retry the proposal."
             )
         try:
-            parsed = ProposalReply.model_validate({"model": reply.model, **dict(reply.payload)})
+            parsed = ProposalReply.model_validate(
+                {"model": reply.model, **_normalize_payload(reply.payload)}
+            )
         except ValueError as exc:
             raise ModelReplyError(
                 "the provider's broker profile was not the promised structured document "

@@ -228,3 +228,77 @@ def test_person_edit_records_old_to_new_and_retains_the_model_original():
         ("result", {}, {"price": "data.price", "asof": "data.observed_at"}),
     ]
     assert all(change.who == "api" and change.at == AT for change in edited.edits)
+
+
+def test_the_reply_schema_is_strict_and_the_pair_form_folds_back():
+    """Live 2026-09-04: codex refused the schema ("'oneOf' is not permitted")."""
+    import json
+
+    from tick.broker.profile_model import _normalize_payload, _reply_schema
+
+    text = json.dumps(_reply_schema()["input_schema"])
+    assert "oneOf" not in text
+
+    def strict(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert node.get("additionalProperties") is False
+                assert set(node.get("required", [])) == set(node.get("properties", {}))
+            for value in node.values():
+                strict(value)
+        elif isinstance(node, list):
+            for value in node:
+                strict(value)
+
+    strict(_reply_schema()["input_schema"])
+
+    folded = _normalize_payload(
+        {
+            "tools": [
+                {
+                    "name": "get_equity_quotes",
+                    "category": "read.quote",
+                    "bindings": [{"input": "symbols", "value": ["{symbol}"]}],
+                    "paths": [{"role": "price", "path": "data.results.0.quote.last_trade_price"}],
+                    "reason": "quotes",
+                }
+            ]
+        }
+    )
+    assert folded["tools"][0]["arguments"] == {"symbols": ["{symbol}"]}
+    assert folded["tools"][0]["result"] == {"price": "data.results.0.quote.last_trade_price"}
+    assert "bindings" not in folded["tools"][0]
+    recorded = _normalize_payload({"tools": [{"name": "x", "arguments": {"a": 1}, "result": {}}]})
+    assert recorded["tools"][0]["arguments"] == {"a": 1}
+
+
+def test_root_anchored_row_paths_are_rewritten_relative_to_the_items_row():
+    """Live 2026-09-04: the model wrote data.positions.0.symbol for a per-row role."""
+    from tick.broker.profile_model import _normalize_payload
+
+    folded = _normalize_payload(
+        {
+            "tools": [
+                {
+                    "name": "get_equity_positions",
+                    "category": "read.positions",
+                    "arguments": {"account_number": "{account_id}"},
+                    "result": {
+                        "items": "data.positions",
+                        "account": "{account_id}",
+                        "symbol": "data.positions.0.symbol",
+                        "quantity": "data.positions.0.quantity",
+                        "average_cost": "average_buy_price",
+                    },
+                    "reason": "positions",
+                }
+            ]
+        }
+    )
+    assert folded["tools"][0]["result"] == {
+        "items": "data.positions",
+        "account": "{account_id}",
+        "symbol": "symbol",
+        "quantity": "quantity",
+        "average_cost": "average_buy_price",
+    }
