@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
 from tick.agents import Provider
+from tick.agents.errors import ModelReplyError, ProviderUnavailable
 from tick.records import ensure_private_dir, write_private_file
 from tick.spec import canonical_encode, sha256_hex
 
@@ -43,6 +44,7 @@ class ChatTurn(BaseModel):
         "text",
         "tool_call",
         "tool_result",
+        "tool_error",
         "proposal",
         "document",
         "done",
@@ -79,9 +81,17 @@ class ChatSession:
         *,
         provider: Provider,
         model: str | None,
+        codex_cli_version: str | None,
         at: datetime,
     ) -> ChatSession:
-        return cls._create(home, provider=provider, model=model, at=at, scope=None)
+        return cls._create(
+            home,
+            provider=provider,
+            model=model,
+            codex_cli_version=codex_cli_version,
+            at=at,
+            scope=None,
+        )
 
     @classmethod
     def create_setup(
@@ -90,6 +100,7 @@ class ChatSession:
         *,
         provider: Provider,
         model: str | None,
+        codex_cli_version: str | None,
         at: datetime,
         scope: str,
     ) -> ChatSession:
@@ -99,7 +110,14 @@ class ChatSession:
                 "CHAT_SCOPE_INVALID",
                 "scope must name one setup conversation. Choose a supported setup scope.",
             )
-        return cls._create(home, provider=provider, model=model, at=at, scope=scope)
+        return cls._create(
+            home,
+            provider=provider,
+            model=model,
+            codex_cli_version=codex_cli_version,
+            at=at,
+            scope=scope,
+        )
 
     @classmethod
     def _create(
@@ -108,6 +126,7 @@ class ChatSession:
         *,
         provider: Provider,
         model: str | None,
+        codex_cli_version: str | None,
         at: datetime,
         scope: str | None,
     ) -> ChatSession:
@@ -117,10 +136,25 @@ class ChatSession:
                 "CHAT_MODEL_REQUIRED",
                 "anthropic requires the model you chose. Name it and create the chat again.",
             )
-        if provider is Provider.CODEX and model is not None:
+        if provider is Provider.CODEX and (model is None or not model.strip()):
             raise ChatError(
-                "CHAT_MODEL_FORBIDDEN",
-                "codex reports its resolved model. Remove model and create the chat again.",
+                "CHAT_MODEL_REQUIRED",
+                "codex needs a probed or person-chosen model. Resolve it and create the chat "
+                "again.",
+            )
+        if provider is Provider.CODEX and (
+            codex_cli_version is None or not codex_cli_version.strip()
+        ):
+            raise ChatError(
+                "CHAT_CODEX_VERSION_REQUIRED",
+                "codex needs its installed CLI version recorded. Check the CLI and create the "
+                "chat again.",
+            )
+        if provider is Provider.ANTHROPIC and codex_cli_version is not None:
+            raise ChatError(
+                "CHAT_CODEX_VERSION_FORBIDDEN",
+                "an anthropic chat cannot carry a Codex CLI version. Remove it and create the "
+                "chat again.",
             )
         session = cls(home, secrets.token_hex(8))
         ensure_private_dir(session.directory)
@@ -131,6 +165,8 @@ class ChatSession:
             "created_at": at.isoformat(),
             "via": "api",
         }
+        if codex_cli_version is not None:
+            metadata["codex_cli_version"] = codex_cli_version
         if scope is not None:
             metadata["scope"] = scope
         write_private_file(
@@ -230,34 +266,56 @@ def stream_turn(
     *,
     at: datetime,
     adapter: TurnAdapter,
-) -> tuple[dict[str, Any], ...]:
+) -> Iterable[dict[str, Any]]:
     """Persist and return JSON-line chunks; conversation text is not filtered."""
     if not text.strip():
         raise ChatError("CHAT_TURN_EMPTY", "write a message, then send the turn again.")
     session.append("user", {"text": text}, at=at)
-    chunks: list[dict[str, Any]] = []
-    for raw in adapter(session.turns(), CHAT_FRAME):
-        kind = raw.get("kind")
-        if kind not in {
-            "text",
-            "tool_call",
-            "tool_result",
-            "proposal",
-            "document",
-            "done",
-            "error",
-        }:
-            raise ChatError(
-                "CHAT_STREAM_INVALID",
-                "the provider adapter emitted an unknown chunk. The turn stopped; retry it.",
-            )
-        chunk = dict(raw)
-        session.append(
-            str(kind), {key: value for key, value in chunk.items() if key != "kind"}, at=at
-        )
-        chunks.append(chunk)
-    if not chunks or chunks[-1].get("kind") not in {"done", "error"}:
-        done = {"kind": "done"}
-        session.append("done", {}, at=at)
-        chunks.append(done)
-    return tuple(chunks)
+    provider_chunks = adapter(session.turns(), CHAT_FRAME)
+
+    def generate() -> Iterable[dict[str, Any]]:
+        terminal = False
+        try:
+            for raw in provider_chunks:
+                kind = raw.get("kind")
+                if kind not in {
+                    "text",
+                    "tool_call",
+                    "tool_result",
+                    "tool_error",
+                    "proposal",
+                    "document",
+                    "done",
+                    "error",
+                }:
+                    raise ChatError(
+                        "CHAT_STREAM_INVALID",
+                        "the provider adapter emitted an unknown chunk. The turn stopped; "
+                        "retry it.",
+                    )
+                chunk = dict(raw)
+                session.append(
+                    str(kind),
+                    {key: value for key, value in chunk.items() if key != "kind"},
+                    at=at,
+                )
+                terminal = kind in {"done", "error"}
+                yield chunk
+        except (ModelReplyError, ProviderUnavailable) as exc:
+            reason = str(exc)
+            session.append("text", {"text": reason, "source": "provider"}, at=at)
+            yield {
+                "kind": "refused",
+                "code": (
+                    "provider_unavailable"
+                    if isinstance(exc, ProviderUnavailable)
+                    else "model_reply_error"
+                ),
+                "reason": reason,
+            }
+            return
+        if not terminal:
+            session.append("done", {}, at=at)
+            yield {"kind": "done"}
+
+    return generate()

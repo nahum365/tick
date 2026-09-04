@@ -14,10 +14,20 @@ __all__ = ["codex_login_status", "loopback_status", "systemd_unit_fragments"]
 
 
 def codex_login_status() -> tuple[bool, str]:
-    """Ask the CLI when supported; otherwise inspect auth file existence only."""
+    """Require both release executables, then ask the CLI about its login."""
     executable = shutil.which("codex")
     if executable is None:
-        return False, "install the `codex` command, run `codex login`, then run doctor again."
+        return (
+            False,
+            "run `tick provider install codex` to install Codex and its Code Mode host, then "
+            "run `codex login` and doctor again.",
+        )
+    if shutil.which("codex-code-mode-host") is None:
+        return (
+            False,
+            "the Codex Code Mode host is missing. Run `tick provider install codex`, then run "
+            "doctor again.",
+        )
     help_result = subprocess.run(  # noqa: S603
         [executable, "login", "--help"], capture_output=True, text=True, check=False, timeout=10
     )

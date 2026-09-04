@@ -63,7 +63,8 @@ def test_broker_setup_proof_failure_becomes_a_turn_and_denial_holds(tmp_path):
         home,
         scope=SetupScope.BROKER_PROFILE,
         provider=Provider.CODEX,
-        model=None,
+        model="fixture-model",
+        codex_cli_version="0.149.0",
         at=NOW,
     )
     tools = _broker_tools()
@@ -161,11 +162,11 @@ def test_broker_setup_proof_failure_becomes_a_turn_and_denial_holds(tmp_path):
             )
 
     context.setup_chat_adapter = FakeSetupChatClient().turn
-    setup_chat_turn(context, setup.chat.session_id, {"text": "Propose the first fixture."})
+    tuple(setup_chat_turn(context, setup.chat.session_id, {"text": "Propose the first fixture."}))
     assert setup.state.valid is True
     assert setup.state.document["tools"]["transfer_money"]["category"].startswith("denied.")
 
-    setup_chat_turn(context, setup.chat.session_id, {"text": "Prove it."})
+    tuple(setup_chat_turn(context, setup.chat.session_id, {"text": "Prove it."}))
     assert setup.state.valid is False
     proof_turn = next(
         turn
@@ -174,10 +175,12 @@ def test_broker_setup_proof_failure_becomes_a_turn_and_denial_holds(tmp_path):
     )
     assert "regular_hours" in str(proof_turn.payload["result"])
 
-    setup_chat_turn(
-        context,
-        setup.chat.session_id,
-        {"text": "Use regular_hours and emit the complete document again."},
+    tuple(
+        setup_chat_turn(
+            context,
+            setup.chat.session_id,
+            {"text": "Use regular_hours and emit the complete document again."},
+        )
     )
     assert setup.state.valid is True
     assert setup.state.document["tools"]["transfer_money"]["category"].startswith("denied.")
@@ -189,7 +192,8 @@ def test_agent_setup_refuses_missing_provenance_until_complete(tmp_path):
         home,
         scope=SetupScope.AGENT_DRAFT,
         provider=Provider.CODEX,
-        model=None,
+        model="fixture-model",
+        codex_cli_version="0.149.0",
         at=NOW,
     )
     setup.chat.append("user", {"text": "Use my complete rule document."}, at=NOW)
@@ -242,7 +246,13 @@ def test_setup_scopes_expose_disjoint_closed_tool_sets():
 
 
 def test_setup_delete_refuses_an_ordinary_chat_id(tmp_path):
-    chat = ChatSession.create(tmp_path / "tick-home", provider=Provider.CODEX, model=None, at=NOW)
+    chat = ChatSession.create(
+        tmp_path / "tick-home",
+        provider=Provider.CODEX,
+        model="fixture-model",
+        codex_cli_version="0.149.0",
+        at=NOW,
+    )
 
     with pytest.raises(ChatError) as refused:
         SetupChatSession(chat.home, chat.session_id).delete()

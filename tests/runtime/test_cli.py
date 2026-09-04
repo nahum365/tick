@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tick import cli
 from tick.cli import app
 from tick.records import RecordKind, read
 from tick.runtime import AgentRun
@@ -77,6 +78,18 @@ def run_once(agent_id: str, *extra: str, **kwargs):
 def test_the_top_level_help_says_agents_are_rule_agents():
     result = invoke("--help")
     assert "rule agent" in result.output.lower()
+
+
+def test_cli_callback_keeps_the_two_installed_codex_executables_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    home = tmp_path / "tick-home"
+    monkeypatch.setenv("TICK_HOME", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    cli._prepend_home_bin()
+
+    assert cli.os.environ["PATH"].split(cli.os.pathsep)[0] == str(home / "bin")
 
 
 def test_the_market_option_says_tick_ships_no_market_data():

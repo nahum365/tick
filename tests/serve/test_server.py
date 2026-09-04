@@ -361,6 +361,8 @@ def test_chat_routes_persist_and_stream_typed_json_lines(server_box):
     status, created = request(server, "POST", "/v1/chat", secret=secret, body={"provider": "codex"})
     assert status == 201
     chat_id = created["id"]
+    assert created["model"] == "fixture-model"
+    assert created["codex_cli_version"] == "0.149.0"
 
     connection = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
     connection.request(
@@ -404,6 +406,8 @@ def test_setup_chat_routes_start_with_box_text_and_stream_document_state(server_
     assert status == 201
     chat_id = created["chat"]["id"]
     assert created["chat"]["scope"] == "broker_profile"
+    assert created["chat"]["model"] == "fixture-model"
+    assert created["chat"]["codex_cli_version"] == "0.149.0"
     assert created["valid"] is False
     assert [turn["kind"] for turn in created["transcript"]] == ["tool_result", "text"]
 

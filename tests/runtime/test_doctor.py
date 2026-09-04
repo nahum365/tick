@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -78,6 +79,46 @@ def test_doctor_command_prints_refusals_and_exits_nonzero_on_a_fresh_home(tick_h
     assert len(lines) == 13
     assert all(line.startswith("refuse:") for line in lines)
     assert all("." in line for line in lines)
+
+
+def test_codex_observation_requires_the_code_mode_host(monkeypatch):
+    monkeypatch.setattr(
+        doctor_observations.shutil,
+        "which",
+        lambda name: "/fixture/codex" if name == "codex" else None,
+    )
+
+    available, reason = doctor_observations.codex_login_status()
+
+    assert available is False
+    assert "Code Mode host is missing" in reason
+    assert "tick provider install codex" in reason
+
+
+def test_codex_observation_checks_login_after_both_executables(monkeypatch):
+    monkeypatch.setattr(
+        doctor_observations.shutil,
+        "which",
+        lambda name: f"/fixture/{name}",
+    )
+    calls = []
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        if argv[-1] == "--help":
+            return SimpleNamespace(returncode=0, stdout="login status", stderr="")
+        return SimpleNamespace(returncode=0, stdout="logged in", stderr="")
+
+    monkeypatch.setattr(doctor_observations.subprocess, "run", run)
+
+    available, reason = doctor_observations.codex_login_status()
+
+    assert available is True
+    assert reason == "logged in"
+    assert calls == [
+        ["/fixture/codex", "login", "--help"],
+        ["/fixture/codex", "login", "status"],
+    ]
 
 
 def test_persistent_live_in_a_unit_is_a_refusal_with_the_detection_limit(tick_home):

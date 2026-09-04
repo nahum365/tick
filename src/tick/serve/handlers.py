@@ -22,7 +22,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from tick import __version__
-from tick.agents import ModelAgentError, Provider, availability, is_model_agent
+from tick.agents import (
+    ModelAgentError,
+    ModelReplyError,
+    Provider,
+    ProviderUnavailable,
+    availability,
+    is_model_agent,
+)
 from tick.auth import FileTokenStorage
 from tick.broker import (
     BrokerError,
@@ -255,6 +262,7 @@ class ServeContext:
     chat_adapter: Callable[
         [Provider, str | None, tuple[ChatTurn, ...], str], Iterable[Mapping[str, Any]]
     ]
+    codex_chat_identity: Callable[[str | None], Mapping[str, str]]
     setup_chat_adapter: Callable[
         [Provider, str | None, tuple[ChatTurn, ...], str, str],
         Iterable[Mapping[str, Any]],
@@ -422,7 +430,12 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
 
             tick_command = shutil.which("tick") or sys.argv[0]
             client = CodexChatClient.for_environment(tick_command=tick_command)
-            return client.turn(wire, frame, setup_session_id=None)
+            if model is None:
+                raise ChatError(
+                    "CHAT_MODEL_REQUIRED",
+                    "this Codex chat has no pinned model. Create a new chat and try again.",
+                )
+            return client.turn(wire, frame, setup_session_id=None, model=model)
         if model is None:
             raise ChatError(
                 "CHAT_MODEL_REQUIRED",
@@ -454,7 +467,13 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
 
             tick_command = shutil.which("tick") or sys.argv[0]
             client = CodexChatClient.for_environment(tick_command=tick_command)
-            return client.turn(wire, frame, setup_session_id=session_id)
+            if model is None:
+                raise ChatError(
+                    "CHAT_MODEL_REQUIRED",
+                    "this Codex setup chat has no pinned model. Start a new setup chat and try "
+                    "again.",
+                )
+            return client.turn(wire, frame, setup_session_id=session_id, model=model)
         if model is None:
             raise ChatError(
                 "CHAT_MODEL_REQUIRED",
@@ -474,6 +493,15 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
             call_tool=tools.call,
         )
 
+    def identify_codex_chat(requested_model: str | None) -> Mapping[str, str]:
+        from tick.agents.codex_client import CodexChatClient
+
+        tick_command = shutil.which("tick") or sys.argv[0]
+        identity = CodexChatClient.for_environment(tick_command=tick_command).identify(
+            requested_model
+        )
+        return {"model": identity.model, "codex_cli_version": identity.cli_version}
+
     context = ServeContext(
         home=home,
         env=env,
@@ -486,6 +514,7 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         tunnel_status=lambda: tunnel_status(home),
         unit_fragments=systemd_unit_fragments,
         chat_adapter=run_chat,
+        codex_chat_identity=identify_codex_chat,
         setup_chat_adapter=run_setup_chat,
         provider_login_start=start_login,
         provider_browser_login_start=start_browser_login,
@@ -686,15 +715,24 @@ def chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[int, di
         raise APIError(
             400,
             "chat_create_invalid",
-            "the body needs provider, plus model only for anthropic. Correct it and retry.",
+            "the body needs provider and may include a chosen model. Correct it and retry.",
         )
     try:
+        provider = Provider(str(body["provider"]))
+        model, codex_cli_version = _chat_identity(
+            context,
+            provider,
+            str(body["model"]) if body.get("model") is not None else None,
+        )
         session = ChatSession.create(
             context.home,
-            provider=Provider(str(body["provider"])),
-            model=str(body["model"]) if body.get("model") is not None else None,
+            provider=provider,
+            model=model,
+            codex_cli_version=codex_cli_version,
             at=_aware(context.now()),
         )
+    except (ModelReplyError, ProviderUnavailable) as exc:
+        raise _provider_error(exc) from exc
     except (ChatError, ValueError) as exc:
         raise _chat_error(exc) from exc
     return 201, session.metadata
@@ -717,7 +755,7 @@ def chat_get(context: ServeContext, session_id: str) -> dict[str, Any]:
 
 def chat_turn(
     context: ServeContext, session_id: str, body: Mapping[str, Any]
-) -> tuple[dict[str, Any], ...]:
+) -> Iterable[dict[str, Any]]:
     if set(body) != {"text"} or not isinstance(body.get("text"), str):
         raise APIError(
             400,
@@ -737,6 +775,8 @@ def chat_turn(
                 provider, model, transcript, frame
             ),
         )
+    except (ModelReplyError, ProviderUnavailable) as exc:
+        raise _provider_error(exc) from exc
     except (ChatError, ValueError) as exc:
         raise _chat_error(exc) from exc
 
@@ -761,17 +801,24 @@ def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[i
         raise APIError(
             400,
             "setup_chat_create_invalid",
-            "the body needs scope and provider, plus model only for anthropic. "
-            "Correct it and start again.",
+            "the body needs scope and provider and may include a chosen model. Correct it and "
+            "start again.",
         )
     session: SetupChatSession | None = None
     try:
         scope = SetupScope(str(body["scope"]))
+        provider = Provider(str(body["provider"]))
+        model, codex_cli_version = _chat_identity(
+            context,
+            provider,
+            str(body["model"]) if body.get("model") is not None else None,
+        )
         session = SetupChatSession.create(
             context.home,
             scope=scope,
-            provider=Provider(str(body["provider"])),
-            model=str(body["model"]) if body.get("model") is not None else None,
+            provider=provider,
+            model=model,
+            codex_cli_version=codex_cli_version,
             at=_aware(context.now()),
         )
         if scope is SetupScope.BROKER_PROFILE:
@@ -793,6 +840,10 @@ def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[i
             opening = SLOTS[0].question
         session.chat.append("text", {"text": opening, "source": "box"}, at=_aware(context.now()))
         return 201, session.response()
+    except (ModelReplyError, ProviderUnavailable) as exc:
+        if session is not None:
+            session.delete()
+        raise _provider_error(exc) from exc
     except (ChatError, ValueError, OSError) as exc:
         if session is not None:
             session.delete()
@@ -808,7 +859,7 @@ def setup_chat_get(context: ServeContext, session_id: str) -> dict[str, Any]:
 
 def setup_chat_turn(
     context: ServeContext, session_id: str, body: Mapping[str, Any]
-) -> tuple[dict[str, Any], ...]:
+) -> Iterable[dict[str, Any]]:
     if set(body) != {"text"} or not isinstance(body.get("text"), str):
         raise APIError(
             400,
@@ -823,28 +874,33 @@ def setup_chat_turn(
         scope = setup.state.scope
 
         def adapt(transcript: tuple[ChatTurn, ...], frame: str):
-            terminal: dict[str, Any] | None = None
-            for raw in context.setup_chat_adapter(
+            provider_chunks = context.setup_chat_adapter(
                 provider,
                 model,
                 transcript,
                 frame,
                 session_id,
-            ):
-                chunk = dict(raw)
-                if chunk.get("kind") in {"done", "error"}:
-                    terminal = chunk
-                else:
-                    yield chunk
-            state = setup.state
-            yield {
-                "kind": "document",
-                "document": state.document,
-                "valid": state.valid,
-                "verdict": state.verdict,
-            }
-            if terminal is not None:
-                yield terminal
+            )
+
+            def generate():
+                terminal: dict[str, Any] | None = None
+                for raw in provider_chunks:
+                    chunk = dict(raw)
+                    if chunk.get("kind") in {"done", "error"}:
+                        terminal = chunk
+                    else:
+                        yield chunk
+                state = setup.state
+                yield {
+                    "kind": "document",
+                    "document": state.document,
+                    "valid": state.valid,
+                    "verdict": state.verdict,
+                }
+                if terminal is not None:
+                    yield terminal
+
+            return generate()
 
         return stream_turn(
             setup.chat,
@@ -852,6 +908,8 @@ def setup_chat_turn(
             at=_aware(context.now()),
             adapter=lambda transcript, _frame: adapt(transcript, SETUP_FRAMES[scope]),
         )
+    except (ModelReplyError, ProviderUnavailable) as exc:
+        raise _provider_error(exc) from exc
     except (ChatError, ValueError) as exc:
         raise _setup_chat_error(exc) from exc
 
@@ -2268,6 +2326,34 @@ def _chat_error(exc: Exception) -> APIError:
         status = 404 if exc.code == "CHAT_NOT_FOUND" else 409
         return APIError(status, exc.code.lower(), exc.reason)
     return APIError(400, "chat_invalid", f"{exc} Correct the chat request and retry.")
+
+
+def _chat_identity(
+    context: ServeContext,
+    provider: Provider,
+    requested_model: str | None,
+) -> tuple[str | None, str | None]:
+    if provider is not Provider.CODEX:
+        return requested_model, None
+    identity = context.codex_chat_identity(requested_model)
+    model = identity.get("model")
+    version = identity.get("codex_cli_version")
+    if not isinstance(model, str) or not model.strip():
+        raise ProviderUnavailable(
+            "codex did not identify the chat model. Check the CLI installation and create the "
+            "chat again."
+        )
+    if not isinstance(version, str) or not version.strip():
+        raise ProviderUnavailable(
+            "codex did not identify its CLI version. Check the CLI installation and create the "
+            "chat again."
+        )
+    return model, version
+
+
+def _provider_error(exc: ModelReplyError | ProviderUnavailable) -> APIError:
+    code = "provider_unavailable" if isinstance(exc, ProviderUnavailable) else "model_reply_error"
+    return APIError(409, code, str(exc))
 
 
 def _setup_chat_error(exc: Exception) -> APIError:

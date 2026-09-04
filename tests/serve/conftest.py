@@ -124,6 +124,10 @@ def server_box(box_home: Path):
         loopback_status=lambda: (True, "fixture loopback is reachable."),
         tunnel_status=lambda: (True, "fixture tunnel is direct."),
         unit_fragments=lambda: (True, "fixture units are paper-only.", ("--market broker",)),
+        codex_chat_identity=lambda model: {
+            "model": model or "fixture-model",
+            "codex_cli_version": "0.149.0",
+        },
         chat_adapter=lambda _provider, _model, _transcript, _frame: (
             {"kind": "text", "text": "fixture reply"},
             {"kind": "done", "model": "fixture-model"},
@@ -147,6 +151,10 @@ def server_box(box_home: Path):
         codex_install=lambda: {
             "code": "CODEX_INSTALLED",
             "path": "/fixture/bin/codex",
+            "paths": {
+                "codex": "/fixture/bin/codex",
+                "codex-code-mode-host": "/fixture/bin/codex-code-mode-host",
+            },
             "release": "rust-v0.0.0",
             "sha256": "f" * 64,
             "reason": "fixture installed",

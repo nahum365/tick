@@ -1674,7 +1674,7 @@ def provider_list() -> None:
 def provider_install(
     provider: Annotated[Provider, typer.Argument(help="Only codex can be installed by Tick")],
 ) -> None:
-    """Install the pinned Codex CLI release under TICK_HOME/bin (Linux x86_64 boxes)."""
+    """Install pinned Codex and Code Mode host under TICK_HOME/bin (Linux x86_64)."""
     from tick.serve.codex_install import CodexInstallError, default_fetch, install_codex
 
     if provider is not Provider.CODEX:
@@ -1683,7 +1683,8 @@ def provider_install(
         result = install_codex(_home(), fetch=default_fetch)
     except CodexInstallError as error:
         _fail(f"{error.code}: {error.reason}")
-    typer.echo(f"{result['code']}: {result['path']} ({result['release']})")
+    for name, path in result["paths"].items():
+        typer.echo(f"{result['code']}: {name} at {path} ({result['release']})")
 
 
 @provider_app.command("check")

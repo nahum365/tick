@@ -67,6 +67,7 @@ class SetupChatSession:
         scope: SetupScope,
         provider: Provider,
         model: str | None,
+        codex_cli_version: str | None,
         at: datetime,
     ) -> SetupChatSession:
         selected = SetupScope(scope)
@@ -74,6 +75,7 @@ class SetupChatSession:
             home,
             provider=provider,
             model=model,
+            codex_cli_version=codex_cli_version,
             at=at,
             scope=selected.value,
         )

@@ -32,6 +32,10 @@ def context(home, metadata: Metadata) -> ServeContext:
         loopback_status=lambda: (True, "ok"),
         tunnel_status=lambda: (True, "ok"),
         unit_fragments=lambda: (True, "ok", ("paper",)),
+        codex_chat_identity=lambda model: {
+            "model": model or "fixture-model",
+            "codex_cli_version": "0.149.0",
+        },
         chat_adapter=lambda _provider, _model, _transcript, _frame: (),
         setup_chat_adapter=lambda _provider, _model, _transcript, _frame, _session: (),
         provider_login_start=lambda: {},
