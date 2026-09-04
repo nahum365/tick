@@ -6,6 +6,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from tick.agents import StructuredReply
 from tick.broker import DiscoveredTool
 from tick.broker.profile import (
@@ -302,3 +304,89 @@ def test_root_anchored_row_paths_are_rewritten_relative_to_the_items_row():
         "quantity": "quantity",
         "average_cost": "average_buy_price",
     }
+
+
+def test_render_omits_an_optional_input_with_no_value_and_names_a_required_one():
+    """Live 2026-09-04: the proposal bound limit_price and stop_price on a market
+    order; the runtime has no such values and must not invent them."""
+    from datetime import UTC, datetime
+
+    from tick.broker import DiscoveredTool
+    from tick.broker.errors import CapabilityUnmapped
+    from tick.broker.profile import (
+        ORDER_VALUES,
+        Category,
+        ProfileTool,
+        contract_for,
+        history_values,
+        mapping_hash,
+    )
+
+    contract = contract_for(
+        DiscoveredTool(
+            name="review_equity_order",
+            title=None,
+            description="review",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_number": {"type": "string"},
+                    "symbol": {"type": "string"},
+                    "side": {"type": "string"},
+                    "type": {"type": "string"},
+                    "quantity": {"type": "string"},
+                    "limit_price": {"type": "string"},
+                },
+                "required": ["account_number", "symbol", "side", "type"],
+            },
+            output_schema=None,
+            annotations=None,
+            execution=None,
+        )
+    )
+    arguments = {
+        "account_number": "{account_id}",
+        "symbol": "{symbol}",
+        "side": "{side}",
+        "type": "{order_type}",
+        "quantity": "{qty}",
+        "limit_price": "{limit_price}",
+    }
+    tool = ProfileTool(
+        category=Category.ORDER_PREFLIGHT,
+        contract=contract,
+        arguments=arguments,
+        result={},
+        confirmed_contract_hash=contract.contract_hash,
+        mapping_hash=mapping_hash(Category.ORDER_PREFLIGHT, arguments, {}),
+        confirmed_at=datetime(2026, 9, 4, tzinfo=UTC),
+        confirmed_by="api",
+        categorizer_version="model-v1:test",
+        proved_contract_hash=None,
+        proved_mapping_hash=None,
+        proved_at=None,
+        proof=None,
+    )
+    values = {"account_id": "A1", "symbol": "XYZ", "side": "buy", "qty": 1, **ORDER_VALUES}
+    rendered = tool.render(values)
+    assert rendered == {
+        "account_number": "A1",
+        "symbol": "XYZ",
+        "side": "buy",
+        "type": "market",
+        "quantity": "1",
+    }
+    assert tool.missing_placeholders({"account_id": "A1"}) == {
+        "symbol": ("symbol",),
+        "side": ("side",),
+        "type": ("order_type",),
+    }
+    with pytest.raises(CapabilityUnmapped) as refused:
+        tool.render({"account_id": "A1"})
+    assert "needs ['symbol']" in str(refused.value)
+
+    window = history_values("XYZ", 5, now=datetime(2026, 9, 4, 12, 0, tzinfo=UTC))
+    assert window["interval"] == "day"
+    assert window["end_time"] == "2026-09-04T12:00:00Z"
+    assert window["start_time"] == "2026-08-15T12:00:00Z"
+    assert window["count"] == 5

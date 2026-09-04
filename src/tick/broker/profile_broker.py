@@ -16,6 +16,7 @@ advertised contract matched, not that a malicious server behaves like it.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -48,7 +49,14 @@ from .port import (
     RejectCode,
     Rejected,
 )
-from .profile import Category, ProfileTool, VerifiedSessionProfile, server_host
+from .profile import (
+    ORDER_VALUES,
+    Category,
+    ProfileTool,
+    VerifiedSessionProfile,
+    history_values,
+    server_host,
+)
 from .toolmap import decimal_at, dig, text_at, timestamp_at, whole_at
 
 __all__ = ["ProfileBroker"]
@@ -178,7 +186,7 @@ class ProfileBroker:
         try:
             mapping, payload = self._call(
                 Category.READ_HISTORY,
-                {"symbol": symbol, "count": n},
+                history_values(symbol, n, now=datetime.now(UTC)),
                 require_proof=False,
             )
         except (CapabilityUnmapped, ToolResultUnreadable) as exc:
@@ -189,11 +197,14 @@ class ProfileBroker:
                 what=what,
                 reason=f"the broker answer has no list at {mapping.result['items']!r}",
             )
-        if len(rows) != n:
+        if len(rows) < n:
             return Unavailable(
                 what=what,
-                reason=f"the broker returned {len(rows)} bars; exactly {n} are required",
+                reason=f"the broker returned {len(rows)} bars; at least {n} are required",
             )
+        # A range-taking broker answers with every bar in the window; the most
+        # recent n are the ones asked for. Nothing is interpolated or invented.
+        rows = list(rows)[-n:]
         bars: list[Bar] = []
         for index, row in enumerate(rows):
             if not isinstance(row, Mapping):
@@ -262,6 +273,10 @@ class ProfileBroker:
                     "symbol": intent.symbol,
                     "side": intent.side.value,
                     "qty": intent.qty,
+                    **ORDER_VALUES,
+                    # One key per intent: a broker that de-duplicates on it will not
+                    # place the same logical order twice on a retried call.
+                    "idempotency_key": str(uuid.uuid4()),
                 },
                 require_proof=self._approval_mode == "standing",
             )

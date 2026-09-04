@@ -35,7 +35,7 @@ import os
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -70,8 +70,10 @@ __all__ = [
     "REQUIRED_RESULT_ROLES",
     "ToolContract",
     "ToolState",
+    "ORDER_VALUES",
     "VerifiedSessionProfile",
     "canonical_json",
+    "history_values",
     "categorize",
     "confirm_profile",
     "contract_for",
@@ -415,6 +417,53 @@ def _placeholders(value: Any) -> frozenset[str]:
     return frozenset()
 
 
+def _placeholders_in(value: Any) -> list[str]:
+    """Every placeholder name inside a template, nested arrays and objects included."""
+    if isinstance(value, str):
+        return _PLACEHOLDER.findall(value)
+    if isinstance(value, Mapping):
+        return [key for item in value.values() for key in _placeholders_in(item)]
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [key for item in value for key in _placeholders_in(item)]
+    return []
+
+
+#: Values the runtime supplies for every history call besides the symbol and count:
+#: a daily bar interval and a window wide enough to hold `count` sessions, so a
+#: broker that takes a time range (Robinhood) and one that takes a count both work.
+HISTORY_INTERVAL = "day"
+HISTORY_CALENDAR_DAYS_PER_BAR = 2
+HISTORY_WINDOW_SLACK_DAYS = 10
+
+
+def history_values(symbol: str, count: int, *, now: datetime) -> dict[str, Any]:
+    """The placeholder values for one `read.history` call, derived, never guessed.
+
+    `start_time`/`end_time` are RFC 3339 UTC and bound the window; the caller keeps
+    the most recent `count` bars of whatever the broker returns inside it.
+    """
+    if count < 1:
+        raise ValueError("a history call needs at least one bar")
+    start = now - timedelta(days=count * HISTORY_CALENDAR_DAYS_PER_BAR + HISTORY_WINDOW_SLACK_DAYS)
+    return {
+        "symbol": symbol,
+        "count": count,
+        "interval": HISTORY_INTERVAL,
+        "start_time": start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end_time": now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+#: Tick places whole-share market orders good for the day, in regular hours; these
+#: are the runtime's values for the order placeholders a mapping may bind. A broker
+#: that spells them differently (gfd, regular_hours) takes a literal in the mapping.
+ORDER_VALUES: Mapping[str, Any] = {
+    "order_type": "market",
+    "time_in_force": "day",
+    "extended_hours": False,
+}
+
+
 def _render_template(value: Any, values: Mapping[str, Any], *, exact_strings: bool) -> Any:
     """Render nested templates without turning array elements into one JSON-looking string."""
     if isinstance(value, str):
@@ -529,9 +578,39 @@ class ProfileTool(ProfileModel):
             and self.proved_mapping_hash == self.mapping_hash
         )
 
+    def placeholders_of(self, name: str) -> tuple[str, ...]:
+        """The placeholder names one argument template refers to, in order."""
+        return tuple(dict.fromkeys(_placeholders_in(self.arguments[name])))
+
+    def missing_placeholders(self, values: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
+        """Required inputs whose placeholders have no value in `values`, by argument.
+
+        An optional input whose placeholders are all absent is simply omitted from
+        the call (see `render`); a required one is reported here so the caller can
+        say exactly which value to supply.
+        """
+        required = set(self.contract.input_schema.get("required") or ())
+        missing: dict[str, tuple[str, ...]] = {}
+        for name in self.arguments:
+            absent = tuple(key for key in self.placeholders_of(name) if key not in values)
+            if absent and name in required:
+                missing[name] = absent
+        return missing
+
     def render(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Render the call's arguments from `values`.
+
+        An optional input whose placeholders all lack a value is left out rather
+        than sent with a guess (a limit price on a market order, say). A required
+        input with a missing placeholder refuses and names it.
+        """
+        required = set(self.contract.input_schema.get("required") or ())
         rendered: dict[str, Any] = {}
         for name, template in self.arguments.items():
+            wanted = self.placeholders_of(name)
+            absent = [key for key in wanted if key not in values]
+            if absent and name not in required and len(absent) == len(wanted):
+                continue
             expected_type = (
                 self.contract.input_schema.get("properties", {}).get(name, {}).get("type")
             )
@@ -1522,7 +1601,42 @@ def prove_profile(
             continue
         try:
             mapping = verified.mapping_for(stored.category, require_proof=False)
-            values = {"account_id": profile.account_id, **probe_values}
+            values = {"account_id": profile.account_id, **ORDER_VALUES, **probe_values}
+            if stored.category is Category.READ_HISTORY and "count" in values:
+                try:
+                    count = int(values["count"])
+                except (TypeError, ValueError):
+                    count = 0
+                if count >= 1:
+                    values = {
+                        **values,
+                        **history_values(str(values.get("symbol", "")), count, now=at),
+                    }
+            missing = mapping.missing_placeholders(values)
+            if missing:
+                needs = sorted({key for keys in missing.values() for key in keys})
+                proof = ProofResult(
+                    success=False,
+                    resolved=(),
+                    unresolved={"needs": ", ".join(needs)},
+                    detail=(
+                        f"this tool needs probe values for: {', '.join(needs)}. Supply them "
+                        "and prove again."
+                    ),
+                )
+                outcomes[name] = proof
+                values_dump = mapping.model_dump(mode="python")
+                values_dump.update(
+                    {
+                        "proved_contract_hash": stored.contract.contract_hash,
+                        "proved_mapping_hash": stored.mapping_hash,
+                        "proved_at": at,
+                        "proof": proof,
+                    }
+                )
+                updated[name] = ProfileTool.model_validate(values_dump)
+                del mapping
+                continue
             arguments = mapping.render(values)
             Draft202012Validator.check_schema(mapping.contract.input_schema)
             Draft202012Validator(mapping.contract.input_schema).validate(arguments)
@@ -1539,8 +1653,8 @@ def prove_profile(
                 resolved=(),
                 unresolved={"call": str(exc)},
                 detail=(
-                    "the proof call was refused or unreadable; supply every required probe "
-                    "input and inspect this tool's mapping"
+                    f"the proof call was refused or unreadable: {str(exc)[:240]}. Inspect "
+                    "this tool's mapping and the probe values, then prove again."
                 ),
             )
         outcomes[name] = proof
