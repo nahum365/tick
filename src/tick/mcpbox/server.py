@@ -8,6 +8,8 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+from tick.broker import DiscoveredTool
+from tick.broker.profile import categorize
 from tick.chat import SetupChatSession, SetupScope
 from tick.interview import SLOTS, InterviewError, InterviewSession
 from tick.records import DataSource, Ledger, RecordKind
@@ -63,9 +65,21 @@ class BoxTools:
             for contract in contracts:
                 if not isinstance(contract, dict):
                     continue
+                hint = categorize(
+                    DiscoveredTool(
+                        name=str(contract.get("name") or ""),
+                        title=contract.get("title"),
+                        description=contract.get("description"),
+                        input_schema=contract.get("input_schema") or {},
+                        output_schema=contract.get("output_schema"),
+                        annotations=contract.get("annotations"),
+                        execution=contract.get("execution"),
+                    )
+                )
                 summaries.append(
                     {
                         "name": contract.get("name"),
+                        "category_hint": hint.value if hint is not None else None,
                         "shape_hash": contract.get("shape_hash"),
                         "contract_hash": contract.get("contract_hash"),
                     }

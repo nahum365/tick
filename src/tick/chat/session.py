@@ -16,7 +16,19 @@ from tick.agents.errors import ModelReplyError, ProviderUnavailable
 from tick.records import ensure_private_dir, write_private_file
 from tick.spec import canonical_encode, sha256_hex
 
-__all__ = ["CHAT_FRAME", "ChatError", "ChatSession", "ChatTurn", "stream_turn"]
+__all__ = [
+    "CHAT_FRAME",
+    "MAX_REPLAY_CHARACTERS",
+    "ChatError",
+    "ChatSession",
+    "ChatTurn",
+    "compact_document_frame",
+    "stream_turn",
+]
+
+MAX_REPLAY_CHARACTERS = 200_000
+_MAX_REPLAY_STRING_CHARACTERS = 2_000
+_ELISION_TEXT = "Earlier tool results were elided; call the tool again if you need them."
 
 CHAT_FRAME = (
     "This box contains user-created agents, append-only records, approvals, broker "
@@ -214,6 +226,41 @@ class ChatSession:
                 "Delete this chat or inspect it on the box.",
             ) from exc
 
+    def turns_for_replay(self) -> tuple[Mapping[str, Any], ...]:
+        """Bound provider context while the private transcript keeps exact bodies.
+
+        Tool evidence is recoverable through the named box tool, so replay retains
+        hashes and decision-bearing summaries instead of repeatedly sending contracts.
+        Person and model prose is never discarded; the latest document summary is also
+        permanent because it tells the provider what the box currently holds.
+        """
+        replay = [_compact_turn(turn) for turn in self.turns()]
+        latest_document = next(
+            (
+                index
+                for index in range(len(replay) - 1, -1, -1)
+                if replay[index]["kind"] == "document"
+            ),
+            None,
+        )
+        removable = [
+            index
+            for index, turn in enumerate(replay)
+            if turn["kind"] == "tool_result"
+            or (turn["kind"] == "document" and index != latest_document)
+        ]
+        removed: set[int] = set()
+        while _replay_characters(_with_elision(replay, removed)) > MAX_REPLAY_CHARACTERS:
+            if not removable:
+                raise ChatError(
+                    "CHAT_REPLAY_TOO_LARGE",
+                    "the person's and model's text alone exceeds the provider replay limit. "
+                    "Delete this chat and start a new one; the full transcript remains on "
+                    "the box until you do.",
+                )
+            removed.add(removable.pop(0))
+        return tuple(_with_elision(replay, removed))
+
     def append(self, kind: str, payload: Mapping[str, Any], *, at: datetime) -> ChatTurn:
         turns = self.turns()
         previous = turns[-1].hash if turns else sha256_hex(b"tick.chat.v1.genesis")
@@ -259,7 +306,7 @@ class ChatSession:
             ) from exc
 
 
-TurnAdapter = Callable[[tuple[ChatTurn, ...], str], Iterable[Mapping[str, Any]]]
+TurnAdapter = Callable[[tuple[Mapping[str, Any], ...], str], Iterable[Mapping[str, Any]]]
 
 
 def stream_turn(
@@ -273,7 +320,7 @@ def stream_turn(
     if not text.strip():
         raise ChatError("CHAT_TURN_EMPTY", "write a message, then send the turn again.")
     session.append("user", {"text": text}, at=at)
-    provider_chunks = adapter(session.turns(), CHAT_FRAME)
+    provider_chunks = adapter(session.turns_for_replay(), CHAT_FRAME)
 
     def generate() -> Iterable[dict[str, Any]]:
         terminal = False
@@ -323,3 +370,124 @@ def stream_turn(
             yield {"kind": "done"}
 
     return generate()
+
+
+def compact_document_frame(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose document state without replaying a broker contract body."""
+    document = payload.get("document")
+    value: dict[str, Any] = {
+        "kind": "document",
+        "summary": _document_summary(document, payload),
+    }
+    if document is not None:
+        value["document_hash"] = sha256_hex(canonical_encode(document))
+    for key in ("valid", "complete"):
+        if key in payload:
+            value[key] = payload[key]
+    return value
+
+
+def _compact_turn(turn: ChatTurn) -> dict[str, Any]:
+    if turn.kind == "document":
+        return compact_document_frame(turn.payload)
+    value = {"kind": turn.kind, **turn.payload}
+    if turn.kind == "tool_result":
+        tool = str(turn.payload.get("name") or "the same tool")
+        value["result"] = _compact_tool_result(turn.payload.get("result"), tool=tool)
+    return value
+
+
+def _document_summary(document: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    source = document if isinstance(document, Mapping) else {}
+    proof = payload.get("proof") if isinstance(payload.get("proof"), Mapping) else {}
+    raw_tools = source.get("tools") if isinstance(source.get("tools"), Mapping) else {}
+    tools: dict[str, Any] = {}
+    for name in sorted(str(value) for value in raw_tools):
+        raw = raw_tools.get(name)
+        if not isinstance(raw, Mapping):
+            continue
+        contract = raw.get("contract") if isinstance(raw.get("contract"), Mapping) else {}
+        raw_proof = proof.get(name) if isinstance(proof.get(name), Mapping) else raw.get("proof")
+        tool = {
+            "category": raw.get("category"),
+            "arguments": dict(raw.get("arguments"))
+            if isinstance(raw.get("arguments"), Mapping)
+            else {},
+            "result": dict(raw.get("result")) if isinstance(raw.get("result"), Mapping) else {},
+            "warnings": list(raw.get("warnings"))
+            if isinstance(raw.get("warnings"), (list, tuple))
+            else [],
+            "finalized": bool(raw.get("finalized") or raw.get("confirmed_at") is not None),
+            "proved": bool(isinstance(raw_proof, Mapping) and raw_proof.get("success") is True),
+        }
+        contract_hash = contract.get("contract_hash") or raw.get("contract_hash")
+        if isinstance(contract_hash, str):
+            tool["contract_hash"] = contract_hash
+        tools[name] = _compact_tool_result(tool, tool="broker_draft")
+    return {
+        "server": source.get("server") or source.get("server_url"),
+        "inventory_hash": source.get("inventory_hash"),
+        "tools": tools,
+    }
+
+
+def _compact_tool_result(value: Any, *, tool: str) -> Any:
+    if isinstance(value, str):
+        if len(value) <= _MAX_REPLAY_STRING_CHARACTERS:
+            return value
+        marker = f"… [truncated; call {tool} again for the full value.]"
+        kept = max(0, _MAX_REPLAY_STRING_CHARACTERS - len(marker))
+        return value[:kept] + marker
+    if isinstance(value, Mapping):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key)
+            if name == "contract":
+                compact[name] = _contract_reference(item)
+            elif name == "contracts":
+                compact[name] = (
+                    [_contract_reference(contract) for contract in item]
+                    if isinstance(item, (list, tuple))
+                    else []
+                )
+            elif name == "document":
+                compact[name] = _document_reference(item)
+            else:
+                compact[name] = _compact_tool_result(item, tool=tool)
+        return compact
+    if isinstance(value, (list, tuple)):
+        return [_compact_tool_result(item, tool=tool) for item in value]
+    return value
+
+
+def _contract_reference(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    contract_hash = value.get("contract_hash")
+    return {"contract_hash": contract_hash} if isinstance(contract_hash, str) else {}
+
+
+def _document_reference(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"summary": _document_summary(None, {})}
+    return {
+        "document_hash": sha256_hex(canonical_encode(value)),
+        "summary": _document_summary(value, {}),
+    }
+
+
+def _with_elision(replay: list[dict[str, Any]], removed: set[int]) -> list[Mapping[str, Any]]:
+    if not removed:
+        return list(replay)
+    first = min(removed)
+    values: list[Mapping[str, Any]] = []
+    for index, turn in enumerate(replay):
+        if index == first:
+            values.append({"kind": "text", "text": _ELISION_TEXT, "source": "box"})
+        if index not in removed:
+            values.append(turn)
+    return values
+
+
+def _replay_characters(turns: list[Mapping[str, Any]]) -> int:
+    return len(json.dumps(turns, ensure_ascii=False, sort_keys=True))

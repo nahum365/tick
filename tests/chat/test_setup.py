@@ -146,7 +146,7 @@ def test_broker_setup_repairs_proof_failure_without_another_person_turn(tmp_path
             self.calls += 1
             box = BoxTools(context, setup_session_id=session_id)
             text = str(
-                next(turn.payload["text"] for turn in reversed(transcript) if turn.kind == "user")
+                next(turn["text"] for turn in reversed(transcript) if turn["kind"] == "user")
             )
             if text == "Propose the first fixture." and self.calls == 1:
                 name, arguments = "propose_broker_profile", {"document": first}
@@ -175,6 +175,11 @@ def test_broker_setup_repairs_proof_failure_without_another_person_turn(tmp_path
     assert setup.state.valid is True
     assert setup.state.complete is True
     assert setup.state.document["tools"]["transfer_money"]["category"].startswith("denied.")
+    streamed_documents = [chunk for chunk in chunks if chunk["kind"] == "document"]
+    assert all("document" not in chunk for chunk in streamed_documents)
+    assert all("summary" in chunk and "document_hash" in chunk for chunk in streamed_documents)
+    stored_documents = [turn for turn in setup.chat.turns() if turn.kind == "document"]
+    assert stored_documents[-1].payload["document"] == setup.state.document
     assert [chunk.get("step") for chunk in chunks if chunk["kind"] == "progress"] == [
         "proposing",
         "checking",
@@ -337,7 +342,7 @@ def test_setup_loop_parks_for_a_probe_value_and_resumes_from_the_answer(tmp_path
         nonlocal calls
         calls += 1
         box = BoxTools(context, setup_session_id=session_id)
-        user = next(turn.payload["text"] for turn in reversed(transcript) if turn.kind == "user")
+        user = next(turn["text"] for turn in reversed(transcript) if turn["kind"] == "user")
         if user == "Start.":
             if calls == 1:
                 name = "propose_broker_profile"
@@ -437,6 +442,7 @@ def test_broker_setup_default_reads_are_compact_and_contract_is_on_demand(tmp_pa
     draft = box.broker_draft()
 
     assert marker not in json.dumps(inventory)
+    assert inventory["tools"][0]["category_hint"] == "read.quote"
     assert marker not in json.dumps(draft)
     assert len(json.dumps(inventory)) < 1_000
     assert len(json.dumps(draft)) < 2_000

@@ -50,7 +50,6 @@ from tick.broker.profile import (
 from tick.chat import (
     ChatError,
     ChatSession,
-    ChatTurn,
     SetupChatSession,
     SetupLoopDecision,
     SetupScope,
@@ -261,11 +260,12 @@ class ServeContext:
     tunnel_status: Callable[[], tuple[bool, str]]
     unit_fragments: Callable[[], tuple[bool, str, Sequence[str]]]
     chat_adapter: Callable[
-        [Provider, str | None, tuple[ChatTurn, ...], str], Iterable[Mapping[str, Any]]
+        [Provider, str | None, tuple[Mapping[str, Any], ...], str],
+        Iterable[Mapping[str, Any]],
     ]
     codex_chat_identity: Callable[[str | None], Mapping[str, str]]
     setup_chat_adapter: Callable[
-        [Provider, str | None, tuple[ChatTurn, ...], str, str],
+        [Provider, str | None, tuple[Mapping[str, Any], ...], str, str],
         Iterable[Mapping[str, Any]],
     ]
     provider_login_start: Callable[[], Mapping[str, str]]
@@ -426,10 +426,10 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
     def run_chat(
         provider: Provider,
         model: str | None,
-        transcript: tuple[ChatTurn, ...],
+        transcript: tuple[Mapping[str, Any], ...],
         frame: str,
     ) -> Iterable[Mapping[str, Any]]:
-        wire = tuple(turn.model_dump(mode="json") for turn in transcript)
+        wire = tuple(dict(turn) for turn in transcript)
         if provider is Provider.CODEX:
             from tick.agents.codex_client import CodexChatClient
 
@@ -462,11 +462,11 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
     def run_setup_chat(
         provider: Provider,
         model: str | None,
-        transcript: tuple[ChatTurn, ...],
+        transcript: tuple[Mapping[str, Any], ...],
         frame: str,
         session_id: str,
     ) -> Iterable[Mapping[str, Any]]:
-        wire = tuple(turn.model_dump(mode="json") for turn in transcript)
+        wire = tuple(dict(turn) for turn in transcript)
         if provider is Provider.CODEX:
             from tick.agents.codex_client import CodexChatClient
 

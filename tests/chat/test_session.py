@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import stat
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -7,7 +8,14 @@ from types import SimpleNamespace
 import pytest
 
 from tick.agents import ModelReplyError, Provider, ProviderUnavailable
-from tick.chat import CHAT_FRAME, ChatSession, SetupChatSession, stream_turn
+from tick.chat import (
+    CHAT_FRAME,
+    MAX_REPLAY_CHARACTERS,
+    ChatError,
+    ChatSession,
+    SetupChatSession,
+    stream_turn,
+)
 from tick.serve.handlers import (
     APIError,
     chat_create,
@@ -63,6 +71,150 @@ def test_delete_removes_the_private_transcript(tmp_path):
     session.delete()
 
     assert not session.directory.exists()
+
+
+def test_large_setup_transcript_replays_under_bound_without_losing_prose_or_latest_document(
+    tmp_path,
+):
+    session = ChatSession.create_setup(
+        tmp_path,
+        provider=Provider.CODEX,
+        model="fixture-model",
+        codex_cli_version="0.149.0",
+        scope="broker_profile",
+        at=AT,
+    )
+    contract_body = "full-contract-body-" * 25_000
+    for index in range(30):
+        if index % 10 == 0:
+            session.append("user", {"text": f"person text {index}"}, at=AT)
+            session.append("text", {"text": f"model text {index}"}, at=AT)
+        session.append(
+            "tool_result",
+            {
+                "name": "broker_draft",
+                "result": {
+                    f"field-{field}": f"tool-result-{index}-{field}-" * 400 for field in range(5)
+                },
+            },
+            at=AT,
+        )
+    document = {
+        "server": "https://broker.example.invalid/mcp",
+        "inventory_hash": "sha256:inventory",
+        "tools": {
+            "get_quote": {
+                "category": "read.quote",
+                "arguments": {"symbol": "{symbol}"},
+                "result": {"price": "price"},
+                "warnings": [],
+                "contract": {
+                    "description": contract_body,
+                    "contract_hash": "sha256:contract",
+                },
+            }
+        },
+    }
+    session.append(
+        "document",
+        {
+            "document": document,
+            "valid": True,
+            "complete": False,
+            "proof": {"get_quote": {"success": True}},
+        },
+        at=AT,
+    )
+
+    replay = session.turns_for_replay()
+    encoded = json.dumps(replay, ensure_ascii=False, sort_keys=True)
+
+    assert len(encoded) <= MAX_REPLAY_CHARACTERS
+    assert contract_body in session.transcript_path.read_text(encoding="utf-8")
+    assert contract_body not in encoded
+    assert [turn["text"] for turn in replay if turn["kind"] == "user"] == [
+        "person text 0",
+        "person text 10",
+        "person text 20",
+    ]
+    assert [
+        turn["text"] for turn in replay if turn["kind"] == "text" and turn.get("source") is None
+    ] == [
+        "model text 0",
+        "model text 10",
+        "model text 20",
+    ]
+    assert (
+        sum(
+            turn.get("text")
+            == "Earlier tool results were elided; call the tool again if you need them."
+            for turn in replay
+        )
+        == 1
+    )
+    latest = next(turn for turn in reversed(replay) if turn["kind"] == "document")
+    assert latest["summary"]["tools"]["get_quote"] == {
+        "category": "read.quote",
+        "arguments": {"symbol": "{symbol}"},
+        "result": {"price": "price"},
+        "warnings": [],
+        "finalized": False,
+        "proved": True,
+        "contract_hash": "sha256:contract",
+    }
+    assert len(latest["document_hash"]) == 64
+
+
+def test_tool_result_contract_bodies_become_hash_references_and_long_strings_name_the_tool(
+    tmp_path,
+):
+    session = ChatSession.create(
+        tmp_path,
+        provider=Provider.CODEX,
+        model="fixture-model",
+        codex_cli_version="0.149.0",
+        at=AT,
+    )
+    session.append(
+        "tool_result",
+        {
+            "name": "broker_contract",
+            "result": {
+                "contract": {
+                    "contract_hash": "sha256:one",
+                    "description": "hidden body",
+                },
+                "contracts": [{"contract_hash": "sha256:two", "description": "hidden body two"}],
+                "detail": "x" * 3_000,
+            },
+        },
+        at=AT,
+    )
+
+    result = session.turns_for_replay()[0]["result"]
+
+    assert result["contract"] == {"contract_hash": "sha256:one"}
+    assert result["contracts"] == [{"contract_hash": "sha256:two"}]
+    assert len(result["detail"]) <= 2_000
+    assert "call broker_contract again for the full value" in result["detail"]
+    assert "hidden body" not in json.dumps(result)
+
+
+def test_replay_refuses_when_unelidable_prose_alone_exceeds_the_bound(tmp_path):
+    session = ChatSession.create(
+        tmp_path,
+        provider=Provider.CODEX,
+        model="fixture-model",
+        codex_cli_version="0.149.0",
+        at=AT,
+    )
+    session.append("user", {"text": "x" * MAX_REPLAY_CHARACTERS}, at=AT)
+
+    with pytest.raises(ChatError) as refused:
+        session.turns_for_replay()
+
+    assert refused.value.code == "CHAT_REPLAY_TOO_LARGE"
+    assert "Delete this chat and start a new one" in refused.value.reason
 
 
 def test_provider_failure_before_either_stream_is_a_409(tmp_path):

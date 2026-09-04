@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from tick.agents.errors import ModelReplyError, ProviderUnavailable
 
-from .session import ChatError, ChatTurn
+from .session import ChatError, compact_document_frame
 from .setup import SETUP_FRAMES, SetupChatSession
 
 __all__ = ["MAX_SETUP_MODEL_TURNS", "SetupLoopDecision", "run_setup_loop"]
@@ -41,7 +41,7 @@ class SetupLoopDecision:
 
 
 SetupAdapter = Callable[
-    [tuple[ChatTurn, ...], str],
+    [tuple[Mapping[str, Any], ...], str],
     Iterable[Mapping[str, Any]],
 ]
 SetupEvaluator = Callable[[], SetupLoopDecision]
@@ -64,6 +64,8 @@ def run_setup_loop(
         value = dict(chunk)
         kind = str(value.pop("kind"))
         setup.chat.append(kind, value, at=now())
+        if kind == "document":
+            return compact_document_frame(value)
         return {"kind": kind, **value}
 
     def progress(step: str, detail: str) -> dict[str, Any]:
@@ -76,7 +78,9 @@ def run_setup_loop(
         )
         terminal = False
         try:
-            provider_chunks = adapter(setup.chat.turns(), SETUP_FRAMES[setup.state.scope])
+            provider_chunks = adapter(
+                setup.chat.turns_for_replay(), SETUP_FRAMES[setup.state.scope]
+            )
             for raw in provider_chunks:
                 kind = raw.get("kind")
                 if kind not in _PROVIDER_KINDS:

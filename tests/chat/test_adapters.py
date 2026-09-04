@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from tick.agents import AnthropicChatClient
+from tick.agents import AnthropicChatClient, Provider
 from tick.agents.codex_client import CodexChatClient
+from tick.broker import DiscoveredTool, contract_for, inventory_hash
+from tick.chat import MAX_REPLAY_CHARACTERS, ChatSession
 
 
 class Completed:
@@ -65,6 +68,64 @@ def test_codex_chat_argv_ignores_user_servers_and_registers_only_tick(tmp_path):
         },
         {"kind": "done", "model": "provider-model"},
     )
+
+
+def test_codex_chat_prompt_stays_under_replay_bound_for_recorded_inventory(tmp_path):
+    fixture = (
+        Path(__file__).parents[1] / "broker" / "fixtures" / "robinhood_tools_list_2026-09-04.json"
+    )
+    advertised = json.loads(fixture.read_text(encoding="utf-8"))["tools"]
+    contracts = [
+        contract_for(DiscoveredTool.model_validate(tool)).model_dump(mode="json")
+        for tool in advertised
+    ]
+    session = ChatSession.create_setup(
+        tmp_path,
+        provider=Provider.CODEX,
+        model="fixture-model",
+        codex_cli_version="0.149.0",
+        scope="broker_profile",
+        at=datetime(2026, 9, 4, 12, 0, tzinfo=UTC),
+    )
+    session.append(
+        "tool_result",
+        {
+            "name": "broker_inventory",
+            "result": {
+                "server_url": "https://broker.example.invalid/mcp",
+                "inventory_hash": inventory_hash(
+                    [contract_for(DiscoveredTool.model_validate(tool)) for tool in advertised]
+                ),
+                "contracts": contracts,
+            },
+        },
+        at=datetime(2026, 9, 4, 12, 0, tzinfo=UTC),
+    )
+    seen = []
+
+    def run(_argv, prompt, _timeout):
+        seen.append(prompt)
+        return Completed()
+
+    client = CodexChatClient(
+        run=run,
+        binary="codex",
+        tick_command="tick",
+        timeout_seconds=20,
+    )
+
+    tuple(
+        client.turn(
+            session.turns_for_replay(),
+            "frame",
+            setup_session_id=session.session_id,
+            model="fixture-model",
+        )
+    )
+
+    assert len(seen[0]) < MAX_REPLAY_CHARACTERS
+    assert "input_schema" not in seen[0]
+    assert "contract_hash" in seen[0]
 
 
 def test_codex_0_149_fixture_decodes_completed_tools_and_usage():
