@@ -56,11 +56,34 @@ class BoxTools:
 
     def broker_inventory(self) -> dict[str, Any]:
         self._require_scope(SetupScope.BROKER_PROFILE)
-        return dict(self.context.broker_profile_operation("inventory", {}))
+        inventory = dict(self.context.broker_profile_operation("inventory", {}))
+        contracts = inventory.get("contracts")
+        summaries = []
+        if isinstance(contracts, list):
+            for contract in contracts:
+                if not isinstance(contract, dict):
+                    continue
+                summaries.append(
+                    {
+                        "name": contract.get("name"),
+                        "shape_hash": contract.get("shape_hash"),
+                        "contract_hash": contract.get("contract_hash"),
+                    }
+                )
+        return {
+            "server_url": inventory.get("server_url"),
+            "inventory_hash": inventory.get("inventory_hash"),
+            "tools": summaries,
+            "evidence": ["display_only"],
+        }
+
+    def broker_contract(self, name: str) -> dict[str, Any]:
+        self._require_scope(SetupScope.BROKER_PROFILE)
+        return dict(self.context.broker_profile_operation("contract", {"name": name}))
 
     def broker_draft(self) -> dict[str, Any]:
         setup = self._require_scope(SetupScope.BROKER_PROFILE)
-        return {**handlers.broker_profile(self.context), "valid": setup.state.valid}
+        return _compact_broker_draft(handlers.broker_profile(self.context), setup)
 
     def propose_broker_profile(self, document: dict[str, Any]) -> dict[str, Any]:
         setup = self._require_scope(SetupScope.BROKER_PROFILE)
@@ -79,6 +102,10 @@ class BoxTools:
             setup.save(
                 document=document,
                 valid=False,
+                complete=False,
+                waiting_for=(),
+                probe_values=setup.state.probe_values,
+                proof={},
                 verdict=verdict,
                 at=self.context.now(),
             )
@@ -94,13 +121,29 @@ class BoxTools:
             "denied": result.get("denied", []),
             "evidence": ["checked"],
         }
-        setup.save(document=proposal, valid=True, verdict=verdict, at=self.context.now())
-        return {"valid": True, "document": proposal, **verdict}
+        setup.save(
+            document=proposal,
+            valid=True,
+            complete=False,
+            waiting_for=(),
+            probe_values=setup.state.probe_values,
+            proof={},
+            verdict=verdict,
+            at=self.context.now(),
+        )
+        return {
+            "valid": True,
+            "summary": _compact_broker_draft({"proposal": proposal}, setup),
+            **verdict,
+        }
 
     def prove_broker_draft(self, probe: dict[str, Any]) -> dict[str, Any]:
         setup = self._require_scope(SetupScope.BROKER_PROFILE)
+        probe_values = {**setup.state.probe_values, **probe}
         try:
-            result = dict(self.context.broker_profile_operation("prove", {"probe": probe}))
+            result = dict(
+                self.context.broker_profile_operation("prove_draft", {"probe": probe_values})
+            )
         except Exception as exc:  # noqa: BLE001 - proof refusal must become conversation
             verdict = {
                 "code": "BROKER_PROOF_REFUSED",
@@ -109,26 +152,26 @@ class BoxTools:
             }
             setup.save(
                 document=setup.state.document,
-                valid=False,
+                valid=setup.state.valid,
+                complete=False,
+                waiting_for=setup.state.waiting_for,
+                probe_values=probe_values,
+                proof=setup.state.proof,
                 verdict=verdict,
                 at=self.context.now(),
             )
             return {"valid": False, **verdict}
         outcomes = result.get("outcome")
-        passed = (
-            isinstance(outcomes, dict)
-            and bool(outcomes)
-            and all(
-                isinstance(value, dict) and value.get("success") is True
-                for value in outcomes.values()
-            )
+        passed = isinstance(outcomes, dict) and all(
+            isinstance(value, dict) and value.get("success") is True for value in outcomes.values()
         )
+        waiting_for = _proof_needs(outcomes if isinstance(outcomes, dict) else {})
         verdict = {
             "code": "BROKER_PROOF_VALID" if passed else "BROKER_PROOF_FAILED",
             "reason": (
-                "Every finalized mapping proved; the person can continue reviewing."
+                "Every proposed read and preflight mapping proved; the person can review it."
                 if passed
-                else "At least one finalized mapping did not prove. Fix the named mapping or "
+                else "At least one proposed mapping did not prove. Fix the named mapping or "
                 "probe value, then prove it again."
             ),
             "outcome": outcomes if isinstance(outcomes, dict) else {},
@@ -136,11 +179,15 @@ class BoxTools:
         }
         setup.save(
             document=setup.state.document,
-            valid=passed,
+            valid=setup.state.valid,
+            complete=setup.state.valid and passed,
+            waiting_for=waiting_for,
+            probe_values=probe_values,
+            proof=outcomes if isinstance(outcomes, dict) else {},
             verdict=verdict,
             at=self.context.now(),
         )
-        return {"valid": passed, **verdict}
+        return {"valid": setup.state.valid, "proved": passed, **verdict}
 
     def broker_accounts(self) -> dict[str, Any]:
         self._require_scope(SetupScope.BROKER_PROFILE)
@@ -190,6 +237,10 @@ class BoxTools:
             setup.save(
                 document=candidate,
                 valid=False,
+                complete=False,
+                waiting_for=tuple(_open_questions(document)),
+                probe_values={},
+                proof={},
                 verdict=verdict,
                 at=self.context.now(),
             )
@@ -200,7 +251,16 @@ class BoxTools:
             "open_questions": [],
             "evidence": ["checked"],
         }
-        setup.save(document=candidate, valid=True, verdict=verdict, at=self.context.now())
+        setup.save(
+            document=candidate,
+            valid=True,
+            complete=True,
+            waiting_for=(),
+            probe_values={},
+            proof={},
+            verdict=verdict,
+            at=self.context.now(),
+        )
         return {"valid": True, "document": candidate, **verdict}
 
     def _require_scope(self, expected: SetupScope) -> SetupChatSession:
@@ -260,6 +320,7 @@ class BoxTools:
             scoped = {
                 SetupScope.BROKER_PROFILE: {
                     "broker_inventory": self.broker_inventory,
+                    "broker_contract": self.broker_contract,
                     "broker_draft": self.broker_draft,
                     "propose_broker_profile": self.propose_broker_profile,
                     "prove_broker_draft": self.prove_broker_draft,
@@ -321,6 +382,7 @@ def build_server(tools: BoxTools) -> MCPServer:
         functions = (
             (
                 tools.broker_inventory,
+                tools.broker_contract,
                 tools.broker_draft,
                 tools.propose_broker_profile,
                 tools.prove_broker_draft,
@@ -456,3 +518,59 @@ def _open_questions(document: dict[str, Any]) -> list[str]:
     except ValueError:
         return ["spec"]
     return sorted(meaning_bearing_fields(parsed) - provenance.keys())
+
+
+def _proof_needs(outcomes: dict[str, Any]) -> tuple[str, ...]:
+    needs: set[str] = set()
+    for outcome in outcomes.values():
+        if not isinstance(outcome, dict):
+            continue
+        unresolved = outcome.get("unresolved")
+        if not isinstance(unresolved, dict) or not isinstance(unresolved.get("needs"), str):
+            continue
+        needs.update(value.strip() for value in unresolved["needs"].split(",") if value.strip())
+    return tuple(sorted(needs))
+
+
+def _compact_broker_draft(payload: dict[str, Any], setup: SetupChatSession) -> dict[str, Any]:
+    """Keep default setup reads bounded while retaining every decision-bearing field."""
+    proposal = payload.get("proposal") if isinstance(payload.get("proposal"), dict) else {}
+    profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
+    proposed_tools = proposal.get("tools") if isinstance(proposal.get("tools"), dict) else {}
+    profile_tools = profile.get("tools") if isinstance(profile.get("tools"), dict) else {}
+    state = setup.state
+    tools: list[dict[str, Any]] = []
+    for name in sorted(set(proposed_tools) | set(profile_tools)):
+        proposed = proposed_tools.get(name)
+        finalized = profile_tools.get(name)
+        row = proposed if isinstance(proposed, dict) else finalized
+        if not isinstance(row, dict):
+            continue
+        contract = row.get("contract") if isinstance(row.get("contract"), dict) else {}
+        profile_proof = finalized.get("proof") if isinstance(finalized, dict) else None
+        draft_proof = state.proof.get(name)
+        proof = draft_proof if isinstance(draft_proof, dict) else profile_proof
+        tools.append(
+            {
+                "name": name,
+                "category": row.get("category"),
+                "bindings": row.get("arguments") if isinstance(row.get("arguments"), dict) else {},
+                "result_paths": row.get("result") if isinstance(row.get("result"), dict) else {},
+                "warnings": row.get("warnings") if isinstance(row.get("warnings"), list) else [],
+                "contract_hash": contract.get("contract_hash"),
+                "shape_hash": contract.get("shape_hash"),
+                "finalized": bool(
+                    isinstance(finalized, dict) and finalized.get("confirmed_at") is not None
+                ),
+                "proved": bool(isinstance(proof, dict) and proof.get("success") is True),
+            }
+        )
+    return {
+        "server_url": proposal.get("server") or profile.get("server"),
+        "inventory_hash": proposal.get("inventory_hash") or profile.get("inventory_hash"),
+        "account_id_masked": proposal.get("account_id_masked") or profile.get("account_id_masked"),
+        "valid": state.valid,
+        "complete": state.complete,
+        "tools": tools,
+        "evidence": ["display_only"],
+    }

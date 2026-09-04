@@ -47,6 +47,8 @@ class ChatTurn(BaseModel):
         "tool_error",
         "proposal",
         "document",
+        "progress",
+        "refused",
         "done",
         "error",
     ]
@@ -285,6 +287,8 @@ def stream_turn(
                     "tool_error",
                     "proposal",
                     "document",
+                    "progress",
+                    "refused",
                     "done",
                     "error",
                 }:

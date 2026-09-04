@@ -90,6 +90,7 @@ __all__ = [
     "proposal_path",
     "propose_profile",
     "prove_profile",
+    "prove_proposal",
     "save_profile",
     "save_proposal",
     "sanction_for",
@@ -1645,6 +1646,7 @@ def prove_profile(
         except (
             CapabilityUnmapped,
             ToolResultUnreadable,
+            KeyError,
             SchemaError,
             SchemaValidationError,
         ) as exc:
@@ -1689,6 +1691,105 @@ def prove_profile(
         drift=profile.drift,
     )
     return rebuilt, outcomes
+
+
+def prove_proposal(
+    proposal: ProfileProposal,
+    session: Any,
+    *,
+    probe_values: Mapping[str, Any],
+    at: datetime,
+) -> Mapping[str, ProofResult]:
+    """Exercise proposed reads and preflight without creating authorization.
+
+    Setup proof is deliberately narrower than a verified profile: the live
+    contract must still match exactly, only read tools and preflight may be
+    called, and no result is installed into the callable profile. Missing
+    person values remain named in the outcome instead of being invented.
+    """
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import SchemaError
+    from jsonschema.exceptions import ValidationError as SchemaValidationError
+
+    live = {contract.name: contract for contract in _contracts(session.list_tools())}
+    outcomes: dict[str, ProofResult] = {}
+    for name, mapping in proposal.tools.items():
+        if mapping.category is None or not (
+            mapping.category.value.startswith("read.")
+            or mapping.category is Category.ORDER_PREFLIGHT
+        ):
+            continue
+        try:
+            observed = live.get(name)
+            if observed is None or observed.contract_hash != mapping.contract.contract_hash:
+                raise CapabilityUnmapped(
+                    f"{name} no longer matches the proposed contract. Refresh the inventory "
+                    "and propose the complete document again."
+                )
+            values: dict[str, Any] = {**ORDER_VALUES, **probe_values}
+            if proposal.account_id is not None:
+                values["account_id"] = proposal.account_id
+            if mapping.category is Category.READ_HISTORY and "count" in values:
+                count = int(values["count"])
+                if count >= 1:
+                    values.update(history_values(str(values.get("symbol", "")), count, now=at))
+            required = set(mapping.contract.input_schema.get("required") or ())
+            missing: dict[str, tuple[str, ...]] = {}
+            for argument, template in mapping.arguments.items():
+                absent = tuple(key for key in _placeholders(template) if key not in values)
+                if absent and argument in required:
+                    missing[argument] = absent
+            if missing:
+                needs = sorted({key for keys in missing.values() for key in keys})
+                outcomes[name] = ProofResult(
+                    success=False,
+                    resolved=(),
+                    unresolved={"needs": ", ".join(needs)},
+                    detail=(
+                        f"this tool needs probe values for: {', '.join(needs)}. Supply them "
+                        "and prove again."
+                    ),
+                )
+                continue
+            arguments: dict[str, Any] = {}
+            for argument, template in mapping.arguments.items():
+                wanted = _placeholders(template)
+                if wanted and not wanted.intersection(values) and argument not in required:
+                    continue
+                expected_type = (
+                    mapping.contract.input_schema.get("properties", {})
+                    .get(argument, {})
+                    .get("type")
+                )
+                arguments[argument] = _render_template(
+                    template,
+                    values,
+                    exact_strings=expected_type == "string",
+                )
+            Draft202012Validator.check_schema(mapping.contract.input_schema)
+            Draft202012Validator(mapping.contract.input_schema).validate(arguments)
+            payload = session.call_tool(name, arguments)
+            outcomes[name] = _proof_of(
+                mapping, payload, proposal.account_id or "unbound account", arguments
+            )
+        except (
+            CapabilityUnmapped,
+            ToolResultUnreadable,
+            SchemaError,
+            SchemaValidationError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            outcomes[name] = ProofResult(
+                success=False,
+                resolved=(),
+                unresolved={"call": str(exc)},
+                detail=(
+                    f"the proof call was refused or unreadable: {str(exc)[:240]}. Inspect "
+                    "this tool's mapping and the probe values, then prove again."
+                ),
+            )
+    return outcomes
 
 
 def migrate_toolmap(home: str | os.PathLike[str]) -> Profile | None:

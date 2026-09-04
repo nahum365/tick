@@ -27,15 +27,22 @@ class SetupScope(StrEnum):
 SETUP_FRAMES = {
     SetupScope.BROKER_PROFILE: (
         "Help the person produce one complete broker profile document from the advertised "
-        "contracts. Use only this setup session's broker tools. Warnings are advisory; the "
-        "denial registry is final. A proposal grants no authority. The person finalizes each "
-        "callable tool separately and order tools individually."
+        "contracts. Use only this setup session's broker tools. Read the compact inventory, "
+        "request a full contract only when needed, then propose the whole document. Warnings "
+        "are advisory; the denial registry is final. After a checked failure, fix the complete "
+        "document and propose it again without waiting for the person. When proof needs a "
+        "person-supplied symbol, count, quantity, or side, ask once in one message that lists "
+        "exactly the missing values and why proof needs them; suggest no value. Extract the "
+        "answer into prove_broker_draft. A proposal or proof grants no authority. The person "
+        "finalizes mapped read tools together and every order tool individually."
     ),
     SetupScope.AGENT_DRAFT: (
         "Interview the person until one complete agent draft exists. Use only this setup "
         "session's agent-draft tools. Supply structure, never strategy content or a missing "
         "value. Every meaning-bearing field needs user or model:<reported-id> provenance. "
-        "A proposal creates no agent; only the person may adopt it."
+        "After a checked structural failure, fix and re-propose without waiting. When a value "
+        "must come from the person, ask once in one message that lists exactly what is missing "
+        "and why; suggest no value. A proposal creates no agent; only the person may adopt it."
     ),
 }
 
@@ -48,6 +55,10 @@ class SetupState(BaseModel):
     scope: SetupScope
     document: dict[str, Any] | None
     valid: bool
+    complete: bool
+    waiting_for: tuple[str, ...]
+    probe_values: dict[str, Any]
+    proof: dict[str, Any]
     verdict: dict[str, Any]
     updated_at: AwareDatetime
 
@@ -83,6 +94,10 @@ class SetupChatSession:
         session.save(
             document=None,
             valid=False,
+            complete=False,
+            waiting_for=(),
+            probe_values={},
+            proof={},
             verdict={
                 "code": "SETUP_DOCUMENT_MISSING",
                 "reason": "Keep chatting until the box accepts a complete document.",
@@ -114,6 +129,10 @@ class SetupChatSession:
         *,
         document: dict[str, Any] | None,
         valid: bool,
+        complete: bool,
+        waiting_for: tuple[str, ...],
+        probe_values: dict[str, Any],
+        proof: dict[str, Any],
         verdict: dict[str, Any],
         at: datetime,
     ) -> SetupState:
@@ -121,6 +140,10 @@ class SetupChatSession:
             scope=SetupScope(self.chat.metadata["scope"]),
             document=document,
             valid=valid,
+            complete=complete,
+            waiting_for=waiting_for,
+            probe_values=probe_values,
+            proof=proof,
             verdict=verdict,
             updated_at=at,
         )
@@ -134,6 +157,9 @@ class SetupChatSession:
             "transcript": [turn.model_dump(mode="json") for turn in self.chat.turns()],
             "document": state.document,
             "valid": state.valid,
+            "complete": state.complete,
+            "waiting_for": list(state.waiting_for),
+            "proof": state.proof,
             "verdict": state.verdict,
         }
 

@@ -33,6 +33,7 @@ from tick.broker import (
     load_proposal,
     propose_profile,
     prove_profile,
+    prove_proposal,
     save_profile,
     save_proposal,
     streamable_http_session,
@@ -151,6 +152,15 @@ class BrokerOperations:
                 "to emit it again."
             )
         server = self._known_server()
+        previous = load_proposal(self.home)
+        profile = load_profile(self.home)
+        account_id = (
+            previous.account_id
+            if previous is not None and previous.account_id is not None
+            else profile.account_id
+            if profile is not None
+            else None
+        )
         reply = proposal_reply_from_document(document, model=None)
 
         class DocumentCategorizer:
@@ -164,7 +174,7 @@ class BrokerOperations:
             proposal = propose_profile(
                 session.list_tools(),
                 server=server,
-                account_id=None,
+                account_id=account_id,
                 proposed_at=datetime.now(UTC),
                 categorizer=DocumentCategorizer(),
             )
@@ -180,6 +190,60 @@ class BrokerOperations:
                     for name, tool in proposal.tools.items()
                     if tool.category is not None and tool.category.denied
                 ),
+            }
+        finally:
+            session.close()
+            loopback.__exit__(None, None, None)
+
+    def contract(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return one full advertised contract only when the provider asks for it."""
+        name = body.get("name")
+        if set(body) != {"name"} or not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                "name must identify one advertised broker tool. Read the compact inventory "
+                "and request that contract again."
+            )
+        from tick.broker import contract_for
+
+        server = self._known_server()
+        session, loopback = self._session(server)
+        try:
+            matches = [contract_for(tool) for tool in session.list_tools() if tool.name == name]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"the current inventory has no unique tool named {name!r}. Refresh the "
+                    "compact inventory and choose one advertised name."
+                )
+            return {"contract": matches[0].model_dump(mode="json"), "evidence": ["display_only"]}
+        finally:
+            session.close()
+            loopback.__exit__(None, None, None)
+
+    def prove_draft(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Prove proposed reads/preflight while leaving the callable profile unchanged."""
+        probe = body.get("probe")
+        if set(body) != {"probe"} or not isinstance(probe, dict):
+            raise ValueError(
+                "probe must be an object of person-supplied values. Supply the values named "
+                "by the proof result and retry."
+            )
+        proposal = load_proposal(self.home)
+        if proposal is None:
+            raise ValueError(
+                "no broker draft exists. Ask the provider for the complete document and retry."
+            )
+        session, loopback = self._session(proposal.server)
+        try:
+            outcomes = prove_proposal(
+                proposal,
+                session,
+                probe_values=probe,
+                at=datetime.now(UTC),
+            )
+            return {
+                "outcome": {
+                    name: result.model_dump(mode="json") for name, result in outcomes.items()
+                }
             }
         finally:
             session.close()

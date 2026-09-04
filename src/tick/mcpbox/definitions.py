@@ -96,6 +96,9 @@ def setup_tool_definitions(scope: SetupScope) -> tuple[dict[str, Any], ...]:
     if selected is SetupScope.BROKER_PROFILE:
         schemas = {
             "broker_inventory": _object({}),
+            "broker_contract": _object(
+                {"name": {"type": "string", "minLength": 1}}, required=("name",)
+            ),
             "broker_draft": _object({}),
             "propose_broker_profile": _object(
                 {"document": proposal_document_schema()}, required=("document",)

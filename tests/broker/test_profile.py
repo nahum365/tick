@@ -18,6 +18,7 @@ from tick.broker import (
     inventory_hash,
     load_profile,
     propose_profile,
+    prove_proposal,
     verify_session_profile,
 )
 from tick.broker.errors import CapabilityUnmapped, ToolResultUnreadable
@@ -31,6 +32,7 @@ from tick.broker.profile import (
     mapping_hash,
     profile_path,
 )
+from tick.broker.profile_model import proposal_reply_from_document
 from tick.records import write_private_file
 
 AT = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
@@ -114,6 +116,113 @@ class Session:
     def call_tool(self, name, arguments):
         self.calls.append((name, arguments))
         return {}
+
+
+def test_setup_proof_names_missing_values_and_never_calls_an_order_tool():
+    quote = tool(
+        "get_quote",
+        input_schema={
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "price": {"type": "string"},
+                "at": {"type": "string", "format": "date-time"},
+            },
+        },
+    )
+    order_schema = {
+        "type": "object",
+        "properties": {
+            "account_id": {"type": "string"},
+            "symbol": {"type": "string"},
+            "side": {"type": "string"},
+            "qty": {"type": "string"},
+        },
+        "required": ["account_id", "symbol", "side", "qty"],
+        "additionalProperties": False,
+    }
+    preflight = tool("preview_order", input_schema=order_schema)
+    place = tool("place_order", input_schema=order_schema)
+    document = {
+        "tools": [
+            {
+                "name": "get_quote",
+                "category": "read.quote",
+                "arguments": {"symbol": "{symbol}"},
+                "result": {"price": "price", "asof": "at"},
+                "reason": "This reads one quote.",
+            },
+            {
+                "name": "preview_order",
+                "category": "order.preflight",
+                "arguments": {
+                    "account_id": "{account_id}",
+                    "symbol": "{symbol}",
+                    "side": "{side}",
+                    "qty": "{qty}",
+                },
+                "result": {},
+                "reason": "This checks one order without placing it.",
+            },
+            {
+                "name": "place_order",
+                "category": "order.place",
+                "arguments": {
+                    "account_id": "{account_id}",
+                    "symbol": "{symbol}",
+                    "side": "{side}",
+                    "qty": "{qty}",
+                },
+                "result": {},
+                "reason": "This places one approved order.",
+            },
+        ]
+    }
+    reply = proposal_reply_from_document(document, model="fixture-model")
+
+    class Categorizer:
+        version = "setup-chat-v1:fixture-model"
+
+        def propose(self, _contracts):
+            return reply
+
+    proposal = propose_profile(
+        [quote, preflight, place],
+        server=SERVER,
+        account_id=ACCOUNT,
+        proposed_at=AT,
+        categorizer=Categorizer(),
+    )
+
+    class ProofSession(Session):
+        def call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            if name == "get_quote":
+                return {"price": "12.34", "at": AT.isoformat()}
+            return {}
+
+    session = ProofSession([quote, preflight, place])
+    missing = prove_proposal(proposal, session, probe_values={}, at=AT)
+
+    assert missing["get_quote"].unresolved == {"needs": "symbol"}
+    assert missing["preview_order"].unresolved == {"needs": "qty, side, symbol"}
+    assert "place_order" not in missing
+    assert session.calls == []
+
+    proved = prove_proposal(
+        proposal,
+        session,
+        probe_values={"symbol": "XYZ", "side": "buy", "qty": "1"},
+        at=AT,
+    )
+
+    assert all(outcome.success for outcome in proved.values())
+    assert [name for name, _arguments in session.calls] == ["get_quote", "preview_order"]
 
 
 def test_category_registry_is_closed_and_unknown_is_not_a_denial():

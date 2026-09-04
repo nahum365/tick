@@ -23,6 +23,7 @@ from tick.broker.profile import (
     PROFILE_FORMAT_VERSION,
     ProofResult,
 )
+from tick.chat import MAX_SETUP_MODEL_TURNS
 from tick.records import read
 from tick.runtime import (
     ApprovalMode,
@@ -409,7 +410,15 @@ def test_setup_chat_routes_start_with_box_text_and_stream_document_state(server_
     assert created["chat"]["model"] == "fixture-model"
     assert created["chat"]["codex_cli_version"] == "0.149.0"
     assert created["valid"] is False
-    assert [turn["kind"] for turn in created["transcript"]] == ["tool_result", "text"]
+    assert created["complete"] is False
+    created_kinds = [turn["kind"] for turn in created["transcript"]]
+    assert created_kinds[:2] == ["tool_result", "text"]
+    assert created_kinds.count("document") == MAX_SETUP_MODEL_TURNS
+    assert created["transcript"][-2]["payload"]["step"] == "stopped"
+    assert (
+        "edit the document, answer the requested values, or retry"
+        in created["transcript"][-1]["payload"]["text"]
+    )
 
     connection = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
     connection.request(
@@ -422,13 +431,16 @@ def test_setup_chat_routes_start_with_box_text_and_stream_document_state(server_
     chunks = [json.loads(line) for line in response.read().splitlines()]
     connection.close()
     assert response.status == 200
-    assert [chunk["kind"] for chunk in chunks] == ["text", "document", "done"]
-    assert chunks[1]["valid"] is False
+    assert chunks[0]["step"] == "proposing"
+    assert chunks[-2]["step"] == "stopped"
+    assert "edit the document, answer the requested values, or retry" in chunks[-1]["text"]
+    assert all(chunk["valid"] is False for chunk in chunks if chunk["kind"] == "document")
 
     status, loaded = request(server, "GET", f"/v1/setup/chat/{chat_id}", secret=secret)
     assert status == 200
     assert loaded["document"] is None
     assert loaded["valid"] is False
+    assert loaded["complete"] is False
     assert request(server, "DELETE", f"/v1/setup/chat/{chat_id}", secret=secret)[0] == 200
 
 

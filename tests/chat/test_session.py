@@ -124,13 +124,16 @@ def test_provider_failure_during_both_streams_is_a_final_visible_refusal(tmp_pat
         "reason": "codex lost its provider session. Run `codex login`, then send the turn again.",
     }
     assert ordinary_chunks == (expected,)
-    assert setup_chunks == (expected,)
+    assert setup_chunks[-1] == expected
+    assert setup_chunks[0]["kind"] == "progress"
     ordinary_turns = ChatSession(tmp_path, chat["id"]).turns()
     setup_turns = SetupChatSession(tmp_path, setup["chat"]["id"]).chat.turns()
-    for turns in (ordinary_turns, setup_turns):
-        assert [turn.kind for turn in turns][-2:] == ["user", "text"]
-        assert turns[-1].payload["source"] == "provider"
-        assert "codex login" in turns[-1].payload["text"]
+    assert [turn.kind for turn in ordinary_turns][-2:] == ["user", "text"]
+    assert ordinary_turns[-1].payload["source"] == "provider"
+    assert [turn.kind for turn in setup_turns][-4:] == ["user", "progress", "text", "refused"]
+    assert setup_turns[-2].payload["source"] == "provider"
+    assert "codex login" in ordinary_turns[-1].payload["text"]
+    assert "codex login" in setup_turns[-2].payload["text"]
 
 
 def test_restored_broker_chat_starts_from_box_draft_counts(tmp_path, monkeypatch):
@@ -180,6 +183,7 @@ def test_restored_broker_chat_starts_from_box_draft_counts(tmp_path, monkeypatch
     assert status == 201
     assert response["document"] == restored["proposal"]
     assert response["valid"] is True
+    assert response["complete"] is False
     assert [turn["kind"] for turn in response["transcript"]] == ["tool_result", "text"]
     assert response["transcript"][0]["payload"]["name"] == "broker_draft"
     assert response["transcript"][1]["payload"]["text"] == (
