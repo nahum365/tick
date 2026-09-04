@@ -16,11 +16,12 @@ from typing import IO, Protocol
 
 __all__ = ["ProviderLoginError", "ProviderLoginManager"]
 
+# Codex colours its output even when piped; strip escapes before reading it.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _URL = re.compile("https:" + r"//[^\s]+")
-_CODE = re.compile(
-    r"(?:code\s*[: ]|enter\s+(?:this\s+)?code\s*[: ])\s*([A-Z0-9-]{4,})",
-    re.IGNORECASE,
-)
+# The one-time code is the only hyphenated upper-case token Codex prints
+# (e.g. ABCD-EFGHJ); matching "code:" text captured the word "authorization".
+_CODE = re.compile(r"\b([A-Z0-9]{4,8}-[A-Z0-9]{4,8})\b")
 
 
 class ProviderLoginError(Exception):
@@ -155,14 +156,15 @@ class ProviderLoginManager:
                 text += "\n" + lines.get(timeout=0.05)
             except queue.Empty:
                 pass
-            url = _URL.search(text)
-            code = _CODE.search(text)
+            clean = _ANSI.sub("", text)
+            url = _URL.search(clean)
+            code = _CODE.search(clean)
             if url and code:
                 login.url = url.group(0).rstrip(".,")
                 login.code = code.group(1)
                 break
         if login.url is None or login.code is None:
-            login.error = " ".join(text.split())[-500:]
+            login.error = " ".join(_ANSI.sub("", text).split())[-500:]
 
     def status(self, login_id: str) -> dict[str, str]:
         with self._lock:
