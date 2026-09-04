@@ -128,6 +128,20 @@ def _first_text(result: CallToolResult) -> str | None:
     return None
 
 
+def describe_failure(exc: BaseException) -> str:
+    """Name the leaf exceptions, not the group that carried them.
+
+    anyio task groups raise ExceptionGroup("unhandled errors in a TaskGroup"),
+    which says nothing about the broker; the person needs the leaf sentence
+    (an HTTP status from the token endpoint, a refused redirect, a timeout).
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        leaves = [describe_failure(sub) for sub in exc.exceptions]
+        return "; ".join(leaves) if leaves else f"{type(exc).__name__}: {exc}"
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 class MCPSession:
     """A synchronous handle on one MCP session, closed for good on first failure.
 
@@ -313,7 +327,7 @@ class MCPSession:
                 await self._stop.wait()
         except BaseException as exc:  # noqa: BLE001 - the reason is reported, not swallowed
             self._failure = self._failure or (
-                f"the broker's MCP session failed: {type(exc).__name__}: {exc}. "
+                f"the broker's MCP session failed: {describe_failure(exc)}. "
                 f"Tick stops rather than reconnecting; nothing was retried."
             )
 
@@ -338,7 +352,7 @@ class MCPSession:
             )
         except BaseException as exc:  # noqa: BLE001 - re-raised as a broker failure
             self._fail(
-                f"the broker's MCP session failed mid-call: {type(exc).__name__}: {exc}. "
+                f"the broker's MCP session failed mid-call: {describe_failure(exc)}. "
                 f"Nothing was retried."
             )
         raise AssertionError("unreachable: _fail always raises")  # pragma: no cover

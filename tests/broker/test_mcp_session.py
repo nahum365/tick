@@ -186,3 +186,14 @@ def test_the_mock_over_answers_the_way_the_real_grant_does(
 
     accounts = {row["account"] for row in payload["positions"]}
     assert accounts == {brokerage.agentic_account, brokerage.other_account}
+
+
+def test_describe_failure_names_the_leaf_exceptions_not_the_group():
+    from tick.broker.mcp_session import describe_failure
+
+    inner = ExceptionGroup(
+        "unhandled errors in a TaskGroup", [ValueError("token endpoint said 400")]
+    )
+    outer = ExceptionGroup("unhandled errors in a TaskGroup", [inner, TimeoutError()])
+    assert describe_failure(outer) == "ValueError: token endpoint said 400; TimeoutError"
+    assert describe_failure(RuntimeError("plain")) == "RuntimeError: plain"

@@ -194,6 +194,26 @@ def _mutation_body(body: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, s
     return values, {"via": "api"}
 
 
+def record_broker_outcome(home: Path, *, state: str, reason: str | None, tools: int | None) -> None:
+    """Record how a broker connection ended when no API request carried the outcome.
+
+    Runs on the connect worker thread, so it must not raise: a failed audit write
+    would otherwise vanish with the thread and leave the ledger at "started".
+    """
+    payload: dict[str, Any] = {
+        "event": f"broker_connection_{state}",
+        "via": "loopback",
+        "at": _aware(datetime.now(UTC)),
+    }
+    if reason is not None:
+        payload["reason"] = reason
+    if tools is not None:
+        payload["tools_discovered"] = tools
+    Ledger(home / "broker" / "records.jsonl", clock=lambda: datetime.now(UTC)).append(
+        RecordKind.NOTE, payload, source=DataSource.RUNTIME
+    )
+
+
 def _record_api_mutation(context: ServeContext, domain: str, event: str) -> None:
     """Audit a box mutation without retaining request bodies or credential material."""
     Ledger(context.home / domain / "records.jsonl", clock=context.now).append(
@@ -297,26 +317,14 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         nonlocal connect_manager
         from .broker_connect import BrokerConnectManager
 
-        def record_outcome(state: str, reason: str | None, tools: int | None) -> None:
-            payload: dict[str, Any] = {
-                "event": f"broker_connection_{state}",
-                "via": "loopback",
-                "at": _aware(datetime.now(UTC)),
-            }
-            if reason is not None:
-                payload["reason"] = reason
-            if tools is not None:
-                payload["tools_discovered"] = tools
-            Ledger(home / "broker" / "records.jsonl").append(
-                RecordKind.NOTE, payload, source=DataSource.RUNTIME
-            )
-
         connect_manager = BrokerConnectManager.for_environment(
             home=home,
             callback_received=lambda: browser_bridge.close_active(
                 purpose="broker_connect", reason="callback_received"
             ),
-            on_finished=record_outcome,
+            on_finished=lambda state, reason, tools: record_broker_outcome(
+                home, state=state, reason=reason, tools=tools
+            ),
         )
         return connect_manager.start(server_url, redirect_scheme)
 

@@ -67,3 +67,22 @@ def test_a_failed_connection_reports_the_provider_sentence(tmp_path: Path):
     assert finished.wait(5.0)
     assert outcomes == [("failed", "the broker refused the code", None)]
     assert manager.status(started["connect_id"])["state"] == "failed"
+
+
+def test_record_broker_outcome_writes_a_ledger_row_without_credentials(tmp_path: Path):
+    from tick.records import read
+    from tick.serve.handlers import record_broker_outcome
+
+    record_broker_outcome(
+        tmp_path, state="failed", reason="the token endpoint said 400", tools=None
+    )
+    record_broker_outcome(tmp_path, state="succeeded", reason=None, tools=7)
+    rows = list(read(tmp_path / "broker/records.jsonl"))
+    assert [row.payload["event"] for row in rows] == [
+        "broker_connection_failed",
+        "broker_connection_succeeded",
+    ]
+    assert rows[0].payload["reason"] == "the token endpoint said 400"
+    assert "tools_discovered" not in rows[0].payload
+    assert rows[1].payload["tools_discovered"] == 7
+    assert rows[1].payload["via"] == "loopback"
