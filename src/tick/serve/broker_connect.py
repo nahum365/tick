@@ -50,17 +50,26 @@ class BrokerConnectManager:
             [str, FileTokenStorage, LoopbackAuthorization, float], MCPSession
         ],
         callback_received: Callable[[], None],
+        on_finished: Callable[[str, str | None, int | None], None],
     ) -> None:
         self._home = home
         self._timeout = timeout_seconds
         self._announce_wait = announce_wait_seconds
         self._session_factory = session_factory
         self._callback_received = callback_received
+        # Called once per connection with (state, reason, tools_discovered) when the
+        # worker finishes, on either path. The loopback path has no API request to
+        # audit, so this is how the outcome reaches the record.
+        self._on_finished = on_finished
         self._connects: dict[str, _Connect] = {}
 
     @classmethod
     def for_environment(
-        cls, *, home, callback_received: Callable[[], None]
+        cls,
+        *,
+        home,
+        callback_received: Callable[[], None],
+        on_finished: Callable[[str, str | None, int | None], None],
     ) -> BrokerConnectManager:
         def session_factory(server, storage, loopback, timeout):
             provider = build_oauth_provider(server_url=server, storage=storage, loopback=loopback)
@@ -72,6 +81,7 @@ class BrokerConnectManager:
             announce_wait_seconds=10.0,
             session_factory=session_factory,
             callback_received=callback_received,
+            on_finished=on_finished,
         )
 
     def start(self, server_url: str | None, redirect_scheme: str | None) -> dict[str, object]:
@@ -114,6 +124,7 @@ class BrokerConnectManager:
             finally:
                 session.close()
                 loopback.__exit__(None, None, None)
+                self._on_finished(item.state, item.reason, item.tools)
 
         threading.Thread(target=work, name=f"tick-connect-{connect_id}", daemon=True).start()
         deadline = time.monotonic() + self._announce_wait

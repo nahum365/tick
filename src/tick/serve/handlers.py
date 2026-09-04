@@ -297,11 +297,26 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         nonlocal connect_manager
         from .broker_connect import BrokerConnectManager
 
+        def record_outcome(state: str, reason: str | None, tools: int | None) -> None:
+            payload: dict[str, Any] = {
+                "event": f"broker_connection_{state}",
+                "via": "loopback",
+                "at": _aware(datetime.now(UTC)),
+            }
+            if reason is not None:
+                payload["reason"] = reason
+            if tools is not None:
+                payload["tools_discovered"] = tools
+            Ledger(home / "broker" / "records.jsonl").append(
+                RecordKind.NOTE, payload, source=DataSource.RUNTIME
+            )
+
         connect_manager = BrokerConnectManager.for_environment(
             home=home,
             callback_received=lambda: browser_bridge.close_active(
                 purpose="broker_connect", reason="callback_received"
             ),
+            on_finished=record_outcome,
         )
         return connect_manager.start(server_url, redirect_scheme)
 
