@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
 from tick.agents.errors import ModelReplyError, ProviderUnavailable
+from tick.broker.profile_model import proposal_instructions
 
 from .session import ChatError, compact_document_frame
 from .setup import SETUP_FRAMES, SetupChatSession
@@ -82,12 +84,23 @@ def run_setup_loop(
                 setup.chat.turns_for_replay(),
                 SETUP_FRAMES[setup.state.scope]
                 + (
+                    "\nBroker mapping instructions:\n"
+                    + json.dumps(proposal_instructions(), ensure_ascii=False)
+                    if setup.state.scope.value == "broker_profile"
+                    else ""
+                )
+                + (
                     " This setup is for simulation only. Check the read capabilities needed for "
                     "account and market data. Do not require order preflight, live order "
                     "permissions, quantities or sides for order tests. Live trading is set up "
                     "separately. Explain progress in plain language: connection checks and the "
                     "person's agent plan, not documents, proofs, mappings or schema vocabulary. "
                     "Technical results remain in the activity record."
+                    " Repair checked mapping failures before asking for probe values. "
+                    "Before an eligible account is selected, explain that the person’s "
+                    "next step is Allow read access; do not ask for a symbol yet. The "
+                    "account_id comes from broker_accounts after that consent, never from "
+                    "asking the person to type an account number."
                     if setup.state.goal == "simulation"
                     and setup.state.scope.value == "broker_profile"
                     else (

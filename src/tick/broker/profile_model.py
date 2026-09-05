@@ -34,6 +34,7 @@ __all__ = [
     "ModelCategorizer",
     "check_proposal",
     "proposal_document_schema",
+    "proposal_instructions",
     "proposal_reply_from_document",
 ]
 
@@ -220,7 +221,8 @@ def _row_relative(result: dict[str, str]) -> dict[str, str]:
     return rewritten
 
 
-def _prompt(contracts: Sequence[ToolContract]) -> str:
+def proposal_instructions() -> dict[str, Any]:
+    """The mapping language shared by one-shot and conversational setup."""
     grammar = {
         category.value: {
             "meaning": _CATEGORY_MEANINGS[category],
@@ -230,17 +232,7 @@ def _prompt(contracts: Sequence[ToolContract]) -> str:
         }
         for category in Category
     }
-    advertised = [
-        {
-            "name": contract.name,
-            "description": contract.description,
-            "input_schema": contract.input_schema,
-            "output_schema": contract.output_schema,
-            "annotations_untrusted": contract.annotations,
-        }
-        for contract in contracts
-    ]
-    instructions = {
+    return {
         "task": "Propose a broker profile draft for a person to review and edit.",
         "rules": [
             "Propose at most one tool for each callable category.",
@@ -259,6 +251,11 @@ def _prompt(contracts: Sequence[ToolContract]) -> str:
             "one row of items: items=data.positions and symbol=symbol, never "
             "symbol=data.positions.0.symbol.",
             'Array inputs may wrap a placeholder, for example ["{symbol}"].',
+            "Input names are not values: never bind symbols to the literal word symbols "
+            "or limit to the literal word limit. Preserve JSON types. Omit optional inputs "
+            "that are not needed; obtain required probe values from the person.",
+            "Read the full broker_contract for each tool you map. Category hints are only "
+            "hints, not a mapping. Inspect its actual input and output schemas.",
             "A result role may be {account_id} when the broker omits the account it was sent.",
             "An items path may resolve to one object, which Tick treats as a one-row list.",
             "Cancellation may prove with accepted; its observed time belongs to Tick's "
@@ -270,7 +267,23 @@ def _prompt(contracts: Sequence[ToolContract]) -> str:
         ],
         "category_grammar": grammar,
         "result_role_meanings": _RESULT_MEANINGS,
-        "contracts": advertised,
+        "document_schema": proposal_document_schema(),
+    }
+
+
+def _prompt(contracts: Sequence[ToolContract]) -> str:
+    instructions = {
+        **proposal_instructions(),
+        "contracts": [
+            {
+                "name": contract.name,
+                "description": contract.description,
+                "input_schema": contract.input_schema,
+                "output_schema": contract.output_schema,
+                "annotations_untrusted": contract.annotations,
+            }
+            for contract in contracts
+        ],
     }
     return json.dumps(instructions, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

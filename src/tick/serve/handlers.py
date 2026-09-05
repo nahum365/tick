@@ -1196,7 +1196,13 @@ def _evaluate_setup(context: ServeContext, setup: SetupChatSession) -> SetupLoop
             "name": "prove_broker_draft",
             "reason": f"{exc} Fix the named mapping, then propose the complete document again.",
         }
-    needs = _proof_needs(outcomes)
+    # A missing probe must not hide a broken mapping in another tool. Repair
+    # checked failures before presenting consent or asking the person for values.
+    failures = _proof_mapping_failed(outcomes)
+    needs = () if failures else _proof_needs(outcomes)
+    needs_account = state.goal == "simulation" and "account_id" in needs
+    if needs_account:
+        needs = ("account_id",)
     complete = _all_provable_proved(checks_document, outcomes)
     events = (
         {
@@ -1240,9 +1246,16 @@ def _evaluate_setup(context: ServeContext, setup: SetupChatSession) -> SetupLoop
             ),
         )
     verdict = {
-        "code": "BROKER_PROOF_NEEDS_PERSON" if needs else "BROKER_PROOF_FAILED",
+        "code": "BROKER_READ_ACCESS_NEEDED"
+        if needs_account
+        else "BROKER_PROOF_NEEDS_PERSON"
+        if needs
+        else "BROKER_PROOF_FAILED",
         "reason": (
-            "Proof needs person-supplied values. Answer the provider's one combined question."
+            "The account connection check is ready. Choose Allow read access to select an "
+            "eligible account. Market-data test values come after account selection."
+            if needs_account
+            else "Proof needs person-supplied values. Answer the provider's one combined question."
             if needs
             else "At least one proposed mapping did not prove. The provider can repair the "
             "document and try again."
@@ -1279,6 +1292,22 @@ def _evaluate_setup(context: ServeContext, setup: SetupChatSession) -> SetupLoop
         ),
         events=events,
         completion_text=None,
+    )
+
+
+def _proof_mapping_failed(outcomes: Mapping[str, Any]) -> bool:
+    """Operational failures cannot be repaired by supplying a missing symbol."""
+    return any(
+        not isinstance(outcome, Mapping)
+        or (
+            outcome.get("success") is not True
+            and (
+                not isinstance(outcome.get("unresolved"), Mapping)
+                or set(outcome["unresolved"]) != {"needs"}
+                or not outcome["unresolved"]["needs"]
+            )
+        )
+        for outcome in outcomes.values()
     )
 
 

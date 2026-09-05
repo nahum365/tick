@@ -1446,10 +1446,38 @@ def verify_session_profile(
     )
 
 
+def _result_structure(value: Any, *, depth: int = 0) -> Any:
+    """Bounded observed keys/types let setup repair paths without copying values."""
+    if depth >= 6:
+        return (
+            "object"
+            if isinstance(value, Mapping)
+            else "array"
+            if isinstance(value, list)
+            else type(value).__name__
+        )
+    if isinstance(value, Mapping):
+        return {
+            str(key)[:120]: _result_structure(item, depth=depth + 1)
+            for key, item in list(value.items())[:24]
+        }
+    if isinstance(value, list):
+        return [_result_structure(item, depth=depth + 1) for item in value[:1]]
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int | float):
+        return "number"
+    return type(value).__name__
+
+
 def _proof_of(
     mapping: ProfileTool,
     payload: Any,
-    account_id: str,
+    account_id: str | None,
     arguments: Mapping[str, Any],
 ) -> ProofResult:
     """Resolve and type-check mapped result roles; missing remains explicit."""
@@ -1457,6 +1485,7 @@ def _proof_of(
 
     resolved: list[str] = []
     unresolved: dict[str, str] = {}
+    discovering_accounts = mapping.category is Category.READ_ACCOUNTS and account_id is None
     rows: list[Any] | None = None
     if "items" in mapping.result:
         candidate = dig(payload, mapping.result["items"])
@@ -1471,7 +1500,7 @@ def _proof_of(
                 f"the broker answer carries no list at {mapping.result['items']!r}"
             )
     scoped_rows = rows
-    if rows is not None and "account" in mapping.result:
+    if rows is not None and "account" in mapping.result and not discovering_accounts:
         account_path = mapping.result["account"]
         scoped_rows = [
             row
@@ -1552,10 +1581,14 @@ def _proof_of(
                 failures.append(value.reason)
             elif value is None:
                 failures.append(f"the broker answer carries no usable {path!r}")
+            elif role == "eligible" and not isinstance(value, bool):
+                failures.append(f"{path!r} must be the broker's explicit eligibility boolean")
+            elif role in {"account", "kind"} and not isinstance(value, str):
+                failures.append(f"{path!r} must be a non-empty string")
             else:
                 if role == "account" and str(value) == account_id:
                     matched_account = True
-        if role == "account" and rows and not matched_account:
+        if role == "account" and rows and not matched_account and not discovering_accounts:
             failures.append(f"no result row is scoped to configured account {account_id}")
         if failures:
             unresolved[role] = "; ".join(dict.fromkeys(failures))
@@ -1570,7 +1603,9 @@ def _proof_of(
             "all confirmed result paths resolved with expected types, timezone-aware "
             "timestamps, cardinality, and configured-account scope"
             if success
-            else "one or more confirmed result paths did not resolve; this tool remains unproven"
+            else "one or more result paths did not resolve; this tool remains unproven. "
+            "Repair paths against this observed result structure (keys and types, no values): "
+            + json.dumps(_result_structure(payload), ensure_ascii=False)[:4000]
         ),
     )
 
@@ -1716,6 +1751,10 @@ def prove_proposal(
     from jsonschema.exceptions import ValidationError as SchemaValidationError
 
     live = {contract.name: contract for contract in _contracts(session.list_tools())}
+    claimants: dict[Category, list[str]] = {}
+    for name, mapping in proposal.tools.items():
+        if mapping.category is not None and mapping.category.callable:
+            claimants.setdefault(mapping.category, []).append(name)
     outcomes: dict[str, ProofResult] = {}
     for name, mapping in proposal.tools.items():
         if reads_only and (
@@ -1728,6 +1767,12 @@ def prove_proposal(
         ):
             continue
         try:
+            if len(claimants[mapping.category]) > 1:
+                raise CapabilityUnmapped(
+                    f"More than one tool claims {mapping.category.value}: "
+                    f"{', '.join(sorted(claimants[mapping.category]))}. "
+                    "Propose exactly one tool for this capability; leave the others unmapped."
+                )
             observed = live.get(name)
             if observed is None or observed.contract_hash != mapping.contract.contract_hash:
                 raise CapabilityUnmapped(
@@ -1745,7 +1790,11 @@ def prove_proposal(
             missing: dict[str, tuple[str, ...]] = {}
             for argument, template in mapping.arguments.items():
                 absent = tuple(key for key in _placeholders(template) if key not in values)
-                if absent and argument in required:
+                # A chosen read binding is part of the check even when the
+                # broker permits omitting the input (e.g. symbols or IDs).
+                # Dropping it can issue an unscoped read or return no quote,
+                # hiding the actual need for the person's probe value.
+                if absent and (argument in required or mapping.category.value.startswith("read.")):
                     missing[argument] = absent
             if missing:
                 needs = sorted({key for keys in missing.values() for key in keys})
@@ -1777,9 +1826,7 @@ def prove_proposal(
             Draft202012Validator.check_schema(mapping.contract.input_schema)
             Draft202012Validator(mapping.contract.input_schema).validate(arguments)
             payload = session.call_tool(name, arguments)
-            outcomes[name] = _proof_of(
-                mapping, payload, proposal.account_id or "unbound account", arguments
-            )
+            outcomes[name] = _proof_of(mapping, payload, proposal.account_id, arguments)
         except (
             CapabilityUnmapped,
             ToolResultUnreadable,

@@ -190,7 +190,8 @@ class BoxTools:
                 for value in outcomes.values()
             )
         )
-        waiting_for = _proof_needs(outcomes if isinstance(outcomes, dict) else {})
+        checked = outcomes if isinstance(outcomes, dict) else {}
+        waiting_for = () if handlers._proof_mapping_failed(checked) else _proof_needs(checked)
         verdict = {
             "code": "BROKER_PROOF_VALID" if passed else "BROKER_PROOF_FAILED",
             "reason": (
