@@ -102,7 +102,7 @@ from tick.spec import SpecError
 from .browser_bridge import BrowserBridge, BrowserBridgeError, Viewport
 from .codex_install import default_fetch, install_codex
 from .pairing import rotate_secret
-from .recovery import DigitalOceanMetadata, MetadataPort, recovery_tag
+from .recovery import DigitalOceanMetadata, MetadataPort, recovery_tag, wait_for_recovery_tag
 
 __all__ = [
     "APIError",
@@ -2641,10 +2641,10 @@ def pair_recover(context: ServeContext, body: Mapping[str, Any]) -> tuple[int, d
         )
     try:
         expected = recovery_tag(str(body["nonce"]))
-        tags = context.metadata.tags()
+        visible = wait_for_recovery_tag(context.metadata, expected)
     except (ValueError, RuntimeError) as exc:
         raise APIError(409, "recovery_proof_unavailable", str(exc)) from exc
-    if expected not in tags:
+    if not visible:
         raise APIError(
             403,
             "recovery_tag_missing",
