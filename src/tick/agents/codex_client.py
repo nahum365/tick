@@ -302,39 +302,67 @@ TransportFactory = Callable[[Sequence[str]], AppServerTransport]
 #: dynamic tool calls, token refreshes. A Tick chat grants nothing interactively.
 _REFUSAL = {"code": -32601, "message": "Tick refuses interactive requests"}
 
+#: How long the shared app-server outlives the last interactive chat request.
+#: Scheduled agent ticks never touch it; only a person's conversation keeps it warm.
+APP_SERVER_IDLE_SECONDS = 15 * 60.0
 
-class CodexAppServer:
-    """Drive one app-server conversation: initialize, one thread, streamed turns.
 
-    The connection lives for one Tick turn. Server requests are refused, every
-    notification is handed to the caller in arrival order, and the response to
-    each request is matched by id.
+class CodexAppServerHost:
+    """One long-lived app-server process shared by every chat thread of a session.
+
+    Threads are started or resumed once per process and then continue with plain
+    turns, so Codex keeps them loaded and OpenAI serves the cached prefix. Only
+    one turn runs at a time; the connection is read only while a request or turn
+    is in flight, and stale notifications are drained before the next one.
     """
 
-    def __init__(self, transport: AppServerTransport, *, timeout_seconds: float) -> None:
+    def __init__(self, transport: AppServerTransport) -> None:
         self._transport = transport
-        self._deadline = time.monotonic() + timeout_seconds
+        self._lock = threading.Lock()
         self._sequence = 0
-        self.notifications: list[dict[str, Any]] = []
+        self._initialized = False
+        self.loaded_threads: set[str] = set()
+        self.last_used = time.monotonic()
+        self.alive = True
 
-    def _remaining(self) -> float:
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError
-        return remaining
+    def idle_seconds(self) -> float:
+        return time.monotonic() - self.last_used
 
-    def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
-        """Send one request and return its result; notifications are collected meanwhile."""
+    def acquire(self) -> threading.Lock:
+        self.last_used = time.monotonic()
+        return self._lock
+
+    def initialize(self, deadline: float) -> None:
+        if self._initialized:
+            return
+        self.request(
+            "initialize",
+            {"clientInfo": {"name": "tick", "title": "Tick", "version": __version__}},
+            deadline,
+        )
+        self._transport.send({"method": "initialized"})
+        self._initialized = True
+
+    def drain(self) -> None:
+        """Discard notifications that arrived between turns; nothing here is a turn's."""
+        while True:
+            try:
+                message = self._transport.receive(0.01)
+            except TimeoutError:
+                return
+            if message is None:
+                self._dead("codex app-server exited while idle")
+            self._handle(message)
+
+    def request(self, method: str, params: Mapping[str, Any], deadline: float) -> dict[str, Any]:
+        """Send one request and return its result; notifications meanwhile are dropped."""
         self._sequence += 1
         expected = self._sequence
         self._transport.send({"id": expected, "method": method, "params": dict(params)})
         while True:
-            message = self._transport.receive(self._remaining())
+            message = self._receive(deadline)
             if message is None:
-                raise ModelReplyError(
-                    f"codex app-server closed before answering {method}. The chat turn "
-                    "stopped; retry after checking the provider login."
-                )
+                self._dead(f"codex app-server closed before answering {method}")
             if message.get("id") == expected and "method" not in message:
                 if "error" in message:
                     detail = _error_message(message.get("error")) or "no detail"
@@ -346,39 +374,118 @@ class CodexAppServer:
                 return result if isinstance(result, dict) else {}
             self._handle(message)
 
-    def notify(self, method: str) -> None:
-        self._transport.send({"method": method})
-
-    def events(self) -> Iterable[dict[str, Any]]:
-        """Yield notifications until the turn completes; refuse server requests."""
+    def events(self, thread_id: str, deadline: float) -> Iterable[dict[str, Any]]:
+        """Yield this thread's notifications until its turn completes."""
         while True:
-            message = self._transport.receive(self._remaining())
+            message = self._receive(deadline)
             if message is None:
-                raise ModelReplyError(
-                    "codex app-server closed before the turn completed. The chat turn stopped; "
-                    "retry it."
-                )
-            if self._handle(message):
-                yield message
-                if message.get("method") == "turn/completed":
-                    return
+                self._dead("codex app-server closed before the turn completed")
+            if not self._handle(message):
+                continue
+            params = message.get("params") if isinstance(message.get("params"), dict) else {}
+            if params.get("threadId") not in (None, thread_id):
+                continue
+            yield message
+            if message.get("method") == "turn/completed":
+                return
+
+    def _receive(self, deadline: float) -> dict[str, Any] | None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        return self._transport.receive(remaining)
 
     def _handle(self, message: dict[str, Any]) -> bool:
+        """Refuse server requests; report whether the message is a notification."""
         method = message.get("method")
         if method is None:
             return False
         if "id" in message:
             self._transport.send({"id": message["id"], "error": dict(_REFUSAL)})
             return False
-        self.notifications.append(message)
         return True
 
+    def _dead(self, reason: str) -> None:
+        self.close()
+        raise HostGone(f"{reason}. The chat turn stopped; retry it.")
+
     def close(self) -> None:
-        self._transport.close()
+        if self.alive:
+            self.alive = False
+            self._transport.close()
+
+
+class HostGone(ModelReplyError):
+    """The shared app-server process is gone; the caller starts another and retries once."""
+
+
+class SharedHost:
+    """Lazily start one host, restart it when it dies, retire it when the person goes quiet."""
+
+    def __init__(
+        self,
+        transport: TransportFactory,
+        argv: Callable[[], Sequence[str]],
+        *,
+        idle_seconds: float = APP_SERVER_IDLE_SECONDS,
+    ) -> None:
+        self._transport = transport
+        self._argv = argv
+        self._idle = idle_seconds
+        self._host: CodexAppServerHost | None = None
+        self._guard = threading.Lock()
+        self._timer: threading.Timer | None = None
+
+    def current(self) -> CodexAppServerHost:
+        with self._guard:
+            host = self._host
+            if host is not None and (not host.alive or host.idle_seconds() > self._idle):
+                host.close()
+                host = None
+            if host is None:
+                host = CodexAppServerHost(self._transport(self._argv()))
+                self._host = host
+            self._schedule_retirement()
+            return host
+
+    def discard(self, host: CodexAppServerHost) -> None:
+        with self._guard:
+            host.close()
+            if self._host is host:
+                self._host = None
+
+    def _schedule_retirement(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+        timer = threading.Timer(self._idle, self._retire_if_idle)
+        timer.daemon = True
+        timer.start()
+        self._timer = timer
+
+    def _retire_if_idle(self) -> None:
+        with self._guard:
+            host = self._host
+            if host is not None and host.idle_seconds() >= self._idle:
+                host.close()
+                self._host = None
+
+
+_SHARED: dict[str, SharedHost] = {}
+_SHARED_GUARD = threading.Lock()
+
+
+def shared_host(binary: str, transport: TransportFactory) -> SharedHost:
+    """The process-wide host for one Codex binary; tick-serve keeps exactly one."""
+    with _SHARED_GUARD:
+        host = _SHARED.get(binary)
+        if host is None:
+            host = SharedHost(transport, lambda: [binary, "app-server", "--listen", "stdio://"])
+            _SHARED[binary] = host
+        return host
 
 
 class CodexChatClient:
-    """Stream one Codex app-server turn per chat message, with only Tick's box MCP."""
+    """Stream Codex turns through the session's shared app-server, with only Tick's box MCP."""
 
     def __init__(
         self,
@@ -388,12 +495,14 @@ class CodexChatClient:
         tick_command: str,
         timeout_seconds: float,
         transport: TransportFactory | None = None,
+        host: SharedHost | None = None,
     ) -> None:
         self._run = run
         self._binary = binary
         self._tick_command = tick_command
         self._timeout = timeout_seconds
-        self._transport = transport or _StdioAppServer
+        factory = transport or _StdioAppServer
+        self._host = host or SharedHost(factory, self.app_server_argv)
 
     @classmethod
     def for_environment(cls, *, tick_command: str) -> CodexChatClient:
@@ -408,6 +517,7 @@ class CodexChatClient:
             binary=resolved,
             tick_command=tick_command,
             timeout_seconds=CODEX_TIMEOUT_SECONDS,
+            host=shared_host(resolved, _StdioAppServer),
         )
 
     def app_server_argv(self) -> list[str]:
@@ -446,57 +556,57 @@ class CodexChatClient:
             params["developerInstructions"] = frame
         return params
 
-    def _open(
+    def _attach(
         self,
+        host: CodexAppServerHost,
         *,
+        deadline: float,
         workdir: Path,
         setup_session_id: str | None,
         model: str | None,
         frame: str | None,
-        thread_id: str | None = None,
-        ephemeral: bool = False,
-    ) -> tuple[CodexAppServer, str, str]:
-        """Initialize, then resume the recorded thread or start one; Codex compacts itself."""
-        server = CodexAppServer(
-            self._transport(self.app_server_argv()), timeout_seconds=self._timeout
+        thread_id: str | None,
+        ephemeral: bool,
+    ) -> tuple[str, str]:
+        """Resume the recorded thread, or start one; Codex compacts it itself.
+
+        A thread already loaded in this process continues with no resume call.
+        Returns the thread id and the model the server reports for it.
+        """
+        host.initialize(deadline)
+        host.drain()
+        params = self.thread_params(
+            workdir=workdir, setup_session_id=setup_session_id, model=model, frame=frame
         )
-        try:
-            server.request(
-                "initialize",
-                {"clientInfo": {"name": "tick", "title": "Tick", "version": __version__}},
-            )
-            server.notify("initialized")
-            params = self.thread_params(
-                workdir=workdir, setup_session_id=setup_session_id, model=model, frame=frame
-            )
-            if thread_id is not None:
-                try:
-                    started = server.request("thread/resume", {**params, "threadId": thread_id})
-                except ModelReplyError as exc:
-                    raise ThreadLost(
-                        f"codex no longer holds thread {thread_id}: {exc}. Tick seeds a new "
-                        "thread from its own transcript."
-                    ) from exc
-            else:
-                started = server.request("thread/start", {**params, "ephemeral": ephemeral})
-        except BaseException:
-            server.close()
-            raise
+        if thread_id is not None and thread_id in host.loaded_threads:
+            return thread_id, model or ""
+        if thread_id is not None:
+            try:
+                started = host.request("thread/resume", {**params, "threadId": thread_id}, deadline)
+            except HostGone:
+                raise
+            except ModelReplyError as exc:
+                raise ThreadLost(
+                    f"codex no longer holds thread {thread_id}: {exc}. Tick seeds a new "
+                    "thread from its own transcript."
+                ) from exc
+        else:
+            started = host.request("thread/start", {**params, "ephemeral": ephemeral}, deadline)
         thread = started.get("thread") if isinstance(started.get("thread"), dict) else {}
-        thread_id = thread.get("id")
+        started_id = thread.get("id")
         effective = started.get("model")
-        if not isinstance(thread_id, str) or not thread_id:
-            server.close()
+        if not isinstance(started_id, str) or not started_id:
             raise ModelReplyError(
                 "codex app-server started a thread without an id. The chat turn stopped; retry it."
             )
         if not isinstance(effective, str) or not effective.strip():
-            server.close()
             raise ProviderUnavailable(
                 "codex app-server did not name the thread's model. Choose a model in model "
                 "settings, then create the chat again."
             )
-        return server, thread_id, effective
+        if not ephemeral:
+            host.loaded_threads.add(started_id)
+        return started_id, effective
 
     def identify(self, requested_model: str | None) -> CodexChatIdentity:
         """Resolve the chat model once from the server itself, never from a header."""
@@ -516,8 +626,17 @@ class CodexChatClient:
             workdir = Path(tmp) / "cwd"
             workdir.mkdir(mode=0o700)
             try:
-                server, _thread, effective = self._open(
-                    workdir=workdir, setup_session_id=None, model=None, frame=None, ephemeral=True
+                _thread, effective = self._with_host(
+                    lambda host, deadline: self._attach(
+                        host,
+                        deadline=deadline,
+                        workdir=workdir,
+                        setup_session_id=None,
+                        model=None,
+                        frame=None,
+                        thread_id=None,
+                        ephemeral=True,
+                    )
                 )
             except TimeoutError as exc:
                 raise ProviderUnavailable(
@@ -526,8 +645,21 @@ class CodexChatClient:
                 ) from exc
             except ModelReplyError as exc:
                 raise ProviderUnavailable(str(exc)) from exc
-            server.close()
         return CodexChatIdentity(model=effective, cli_version=version)
+
+    def _with_host(self, operation: Callable[[CodexAppServerHost, float], Any]) -> Any:
+        """Run one operation on the shared host; if the process is gone, start one and retry."""
+        for attempt in range(2):
+            host = self._host.current()
+            with host.acquire():
+                deadline = time.monotonic() + self._timeout
+                try:
+                    return operation(host, deadline)
+                except HostGone:
+                    self._host.discard(host)
+                    if attempt == 1:
+                        raise
+        raise AssertionError("unreachable")
 
     def turn(
         self,
@@ -549,52 +681,67 @@ class CodexChatClient:
         with tempfile.TemporaryDirectory(prefix="tick-chat-") as tmp:
             workdir = Path(tmp) / "cwd"
             workdir.mkdir(mode=0o700)
-            try:
-                server, thread_id, effective = self._open(
-                    workdir=workdir,
-                    setup_session_id=setup_session_id,
-                    model=model,
-                    frame=frame,
-                    thread_id=thread_id,
-                )
-            except TimeoutError as exc:
-                raise ModelReplyError(
-                    f"codex app-server did not start a thread within {self._timeout:.0f}s. "
-                    "The chat turn stopped; send it again if you still want an answer."
-                ) from exc
-            try:
-                server.request(
-                    "turn/start",
-                    {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
-                )
-                usage: dict[str, Any] = {}
-                for event in server.events():
-                    method = event.get("method")
-                    params = event.get("params") if isinstance(event.get("params"), dict) else {}
-                    if method == "thread/tokenUsage/updated":
-                        reported = params.get("tokenUsage")
-                        usage = reported if isinstance(reported, dict) else usage
-                        continue
-                    if method == "turn/completed":
-                        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-                        if turn.get("status") != "completed":
-                            detail = _error_message(turn.get("error")) or "no detail"
-                            raise ModelReplyError(
-                                f"codex turn {turn.get('status') or 'failed'}: {detail}. The "
-                                "chat turn stopped; retry after correcting the provider login."
+            host = self._host.current()
+            with host.acquire():
+                deadline = time.monotonic() + self._timeout
+                try:
+                    active, effective = self._attach(
+                        host,
+                        deadline=deadline,
+                        workdir=workdir,
+                        setup_session_id=setup_session_id,
+                        model=model,
+                        frame=frame,
+                        thread_id=thread_id,
+                        ephemeral=False,
+                    )
+                    host.request(
+                        "turn/start",
+                        {"threadId": active, "input": [{"type": "text", "text": prompt}]},
+                        deadline,
+                    )
+                    usage: dict[str, Any] = {}
+                    for event in host.events(active, deadline):
+                        method = event.get("method")
+                        params = (
+                            event.get("params") if isinstance(event.get("params"), dict) else {}
+                        )
+                        if method == "thread/tokenUsage/updated":
+                            reported = params.get("tokenUsage")
+                            usage = reported if isinstance(reported, dict) else usage
+                            continue
+                        if method == "turn/completed":
+                            turn = (
+                                params.get("turn") if isinstance(params.get("turn"), dict) else {}
                             )
-                        break
-                    chunk = _app_server_chunk(method, params)
-                    if chunk is not None:
-                        yield chunk
-            except TimeoutError as exc:
-                raise ModelReplyError(
-                    f"codex did not answer within {self._timeout:.0f}s. The chat turn stopped; "
-                    "send it again if you still want an answer."
-                ) from exc
-            finally:
-                server.close()
-        yield {"kind": "done", "model": effective, "usage": usage, "codex_thread_id": thread_id}
+                            if turn.get("status") != "completed":
+                                detail = _error_message(turn.get("error")) or "no detail"
+                                raise ModelReplyError(
+                                    f"codex turn {turn.get('status') or 'failed'}: {detail}. "
+                                    "The chat turn stopped; retry after correcting the provider "
+                                    "login."
+                                )
+                            break
+                        chunk = _app_server_chunk(method, params)
+                        if chunk is not None:
+                            yield chunk
+                except HostGone:
+                    self._host.discard(host)
+                    raise
+                except TimeoutError as exc:
+                    # A turn that outlived its deadline leaves the process in an unknown
+                    # state; the next request starts a fresh one.
+                    self._host.discard(host)
+                    raise ModelReplyError(
+                        f"codex did not answer within {self._timeout:.0f}s. The chat turn "
+                        "stopped; send it again if you still want an answer."
+                    ) from exc
+        yield {
+            "kind": "done",
+            "model": effective or model,
+            "usage": usage,
+            "codex_thread_id": active,
+        }
 
     def _checked_run(
         self,

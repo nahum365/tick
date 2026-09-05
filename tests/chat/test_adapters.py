@@ -41,10 +41,13 @@ class FakeAppServer:
         self.sent: list[dict] = []
         self.argv: list[str] | None = None
         self.closed = False
+        self.exited = False
+        self.spawned = 0
         self._pending: list[dict] = []
 
     def __call__(self, argv):
         self.argv = list(argv)
+        self.spawned += 1
         return self
 
     def requests(self, method: str) -> list[dict]:
@@ -87,8 +90,10 @@ class FakeAppServer:
 
     def receive(self, timeout):
         assert timeout > 0
-        if not self._pending:
+        if self.exited:
             return None
+        if not self._pending:
+            raise TimeoutError
         return self._pending.pop(0)
 
     def close(self):
@@ -157,7 +162,7 @@ def test_codex_thread_registers_only_tick_and_runs_read_only_without_approvals()
     assert params["model"] == "provider-model"
     assert params["developerInstructions"] == "structural frame"
     assert [m.get("method") for m in fake.sent[:3]] == ["initialize", "initialized", "thread/start"]
-    assert fake.closed
+    assert not fake.closed, "the app-server outlives the turn for the next one"
     assert chunks == (
         {"kind": "text_delta", "text": "hi"},
         {"kind": "text", "text": "hi"},
@@ -186,18 +191,18 @@ def test_a_recorded_thread_is_resumed_with_only_the_unread_turns():
     unread = ({"kind": "user", "text": "and then?"},)
 
     chunks = tuple(
-        client(fake).turn(unread, "frame", setup_session_id="s1", model="m", thread_id="old-thread")
+        client(fake).turn(unread, "frame", setup_session_id="s1", model="m", thread_id=THREAD)
     )
 
     assert fake.requests("thread/start") == []
     (resume,) = fake.requests("thread/resume")
-    assert resume["threadId"] == "old-thread"
+    assert resume["threadId"] == THREAD
     assert resume["developerInstructions"] == "frame"
     assert resume["config"]["mcp_servers"]["tick"]["args"] == ["mcp", "--setup-session", "s1"]
     (turn,) = fake.requests("turn/start")
-    assert turn["threadId"] == "old-thread"
+    assert turn["threadId"] == THREAD
     assert json.loads(turn["input"][0]["text"]) == {"transcript": list(unread)}
-    assert chunks[-1]["codex_thread_id"] == "old-thread"
+    assert chunks[-1]["codex_thread_id"] == THREAD
 
 
 def test_a_thread_codex_no_longer_holds_raises_thread_lost_before_any_turn():
@@ -209,7 +214,7 @@ def test_a_thread_codex_no_longer_holds_raises_thread_lost_before_any_turn():
         tuple(client(fake).turn((), "frame", setup_session_id=None, model="m", thread_id="gone"))
 
     assert fake.requests("turn/start") == []
-    assert fake.closed
+    assert not fake.closed, "the process stays for the next turn"
 
 
 def test_codex_setup_thread_scopes_the_box_server_to_the_session():
@@ -361,7 +366,7 @@ def test_codex_identity_takes_the_model_from_the_thread_not_a_header():
     assert fake.requests("turn/start") == []
     (params,) = fake.requests("thread/start")
     assert "model" not in params and params["ephemeral"] is True
-    assert fake.closed
+    assert not fake.closed, "the process stays for the next turn"
 
 
 def test_a_person_chosen_model_skips_the_thread_probe():
