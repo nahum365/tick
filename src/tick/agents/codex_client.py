@@ -56,7 +56,7 @@ from typing import Any, Protocol
 from tick import __version__
 
 from .client import ModelClient, ModelReply, ModelRequest, StructuredReply, intents_of
-from .errors import ModelReplyError, ProviderUnavailable
+from .errors import ModelReplyError, ProviderUnavailable, ThreadLost
 
 __all__ = [
     "CODEX_BINARY",
@@ -428,7 +428,6 @@ class CodexChatClient:
             mcp_args.extend(("--setup-session", setup_session_id))
         params: dict[str, Any] = {
             "cwd": str(workdir),
-            "ephemeral": True,
             "sandbox": "read-only",
             "approvalPolicy": "never",
             "config": {
@@ -448,8 +447,16 @@ class CodexChatClient:
         return params
 
     def _open(
-        self, *, workdir: Path, setup_session_id: str | None, model: str | None, frame: str | None
+        self,
+        *,
+        workdir: Path,
+        setup_session_id: str | None,
+        model: str | None,
+        frame: str | None,
+        thread_id: str | None = None,
+        ephemeral: bool = False,
     ) -> tuple[CodexAppServer, str, str]:
+        """Initialize, then resume the recorded thread or start one; Codex compacts itself."""
         server = CodexAppServer(
             self._transport(self.app_server_argv()), timeout_seconds=self._timeout
         )
@@ -459,12 +466,19 @@ class CodexChatClient:
                 {"clientInfo": {"name": "tick", "title": "Tick", "version": __version__}},
             )
             server.notify("initialized")
-            started = server.request(
-                "thread/start",
-                self.thread_params(
-                    workdir=workdir, setup_session_id=setup_session_id, model=model, frame=frame
-                ),
+            params = self.thread_params(
+                workdir=workdir, setup_session_id=setup_session_id, model=model, frame=frame
             )
+            if thread_id is not None:
+                try:
+                    started = server.request("thread/resume", {**params, "threadId": thread_id})
+                except ModelReplyError as exc:
+                    raise ThreadLost(
+                        f"codex no longer holds thread {thread_id}: {exc}. Tick seeds a new "
+                        "thread from its own transcript."
+                    ) from exc
+            else:
+                started = server.request("thread/start", {**params, "ephemeral": ephemeral})
         except BaseException:
             server.close()
             raise
@@ -503,7 +517,7 @@ class CodexChatClient:
             workdir.mkdir(mode=0o700)
             try:
                 server, _thread, effective = self._open(
-                    workdir=workdir, setup_session_id=None, model=None, frame=None
+                    workdir=workdir, setup_session_id=None, model=None, frame=None, ephemeral=True
                 )
             except TimeoutError as exc:
                 raise ProviderUnavailable(
@@ -522,19 +536,26 @@ class CodexChatClient:
         *,
         setup_session_id: str | None,
         model: str,
+        thread_id: str | None = None,
     ) -> Iterable[dict[str, Any]]:
-        """Replay the private transcript and stream prose, tool evidence and completion."""
-        prompt = json.dumps(
-            {"frame": frame, "transcript": list(transcript)},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        """Continue the provider thread with the unread turns; stream prose and evidence.
+
+        ``transcript`` is what the thread has not read yet: the whole compact record
+        for a new thread, only the latest turns for a resumed one. The frame travels
+        as developer instructions, so the input carries conversation only. Raises
+        ``ThreadLost`` when the recorded thread cannot be resumed.
+        """
+        prompt = json.dumps({"transcript": list(transcript)}, ensure_ascii=False, sort_keys=True)
         with tempfile.TemporaryDirectory(prefix="tick-chat-") as tmp:
             workdir = Path(tmp) / "cwd"
             workdir.mkdir(mode=0o700)
             try:
                 server, thread_id, effective = self._open(
-                    workdir=workdir, setup_session_id=setup_session_id, model=model, frame=frame
+                    workdir=workdir,
+                    setup_session_id=setup_session_id,
+                    model=model,
+                    frame=frame,
+                    thread_id=thread_id,
                 )
             except TimeoutError as exc:
                 raise ModelReplyError(
@@ -573,7 +594,7 @@ class CodexChatClient:
                 ) from exc
             finally:
                 server.close()
-        yield {"kind": "done", "model": effective, "usage": usage}
+        yield {"kind": "done", "model": effective, "usage": usage, "codex_thread_id": thread_id}
 
     def _checked_run(
         self,

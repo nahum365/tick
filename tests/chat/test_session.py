@@ -47,7 +47,7 @@ def test_prose_with_a_number_is_delivered_but_never_marked_as_tool_evidence(tmp_
             session,
             "What happened?",
             at=AT,
-            adapter=lambda _transcript, _frame: (
+            adapter=lambda _transcript, _frame, _thread=None: (
                 {"kind": "text", "text": "The answer mentions 999 in prose."},
                 {"kind": "done", "model": "fixture-model"},
             ),
@@ -256,9 +256,9 @@ def test_provider_failure_during_both_streams_is_a_final_visible_refusal(tmp_pat
             "model": model or "fixture-model",
             "codex_cli_version": "0.149.0",
         },
-        chat_adapter=lambda _provider, _model, _transcript, _frame: failed_stream(),
+        chat_adapter=lambda _provider, _model, _transcript, _frame, _thread=None: failed_stream(),
         setup_chat_adapter=(
-            lambda _provider, _model, _transcript, _frame, _session: failed_stream()
+            lambda _provider, _model, _transcript, _frame, _session, _thread=None: failed_stream()
         ),
     )
     _status, chat = chat_create(context, {"provider": "codex"})
@@ -370,3 +370,46 @@ def test_setup_resume_refusals_name_the_available_next_step(tmp_path, monkeypatc
             {"scope": "broker_profile", "provider": "codex", "resume": True},
         )
     assert "Start the broker connection first" in missing.value.reason
+
+
+def test_stream_turn_records_the_provider_thread_and_replays_only_unread_turns(tmp_path):
+    from tick.agents import ThreadLost
+    from tick.chat.session import ChatSession, stream_turn
+
+    session = ChatSession.create(
+        tmp_path,
+        provider=Provider.CODEX,
+        model="m",
+        codex_cli_version="0.149.0",
+        at=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+    )
+    calls: list[tuple[int, str | None]] = []
+    lost_once = {"pending": True}
+
+    def adapter(transcript, _frame, thread_id):
+        calls.append((len(transcript), thread_id))
+        if thread_id == "t1" and lost_once["pending"]:
+            lost_once["pending"] = False
+            raise ThreadLost("gone")
+        yield {"kind": "text", "text": "ok"}
+        yield {"kind": "done", "codex_thread_id": "t2" if thread_id is None and calls else "t1"}
+
+    at = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+    tuple(stream_turn(session, "first", at=at, adapter=adapter))
+    thread = session.provider_thread
+    assert thread is not None and thread.id in {"t1", "t2"}
+    assert thread.seen_seq == session.last_seq(), "the thread has read everything recorded so far"
+    assert calls[0] == (1, None), "a fresh thread receives the whole compact transcript"
+    first_id = thread.id
+
+    tuple(stream_turn(session, "second", at=at, adapter=adapter))
+    # Resumed with only the new user turn; when the thread was lost the whole
+    # transcript seeded a replacement and the record moved on.
+    assert calls[1][1] == first_id
+    assert calls[1][0] == 1
+    if first_id == "t1":
+        assert calls[2] == (session.last_seq() - 2, None)
+    recorded = [t.payload for t in session.turns() if t.kind == "done"]
+    assert all("codex_thread_id" not in payload for payload in recorded), (
+        "the provider thread id is metadata, not a transcript turn"
+    )

@@ -31,10 +31,13 @@ class FakeAppServer:
     server-to-client request in `turn_events` must be refused by the client.
     """
 
-    def __init__(self, *, model: str = "provider-model", turn_events=(), start_error=None):
+    def __init__(
+        self, *, model: str = "provider-model", turn_events=(), start_error=None, resume_error=None
+    ):
         self.model = model
         self.turn_events = list(turn_events)
         self.start_error = start_error
+        self.resume_error = resume_error
         self.sent: list[dict] = []
         self.argv: list[str] | None = None
         self.closed = False
@@ -60,6 +63,19 @@ class FakeAppServer:
                 return
             self._pending.append(
                 {"id": message["id"], "result": {"thread": {"id": THREAD}, "model": self.model}}
+            )
+        elif method == "thread/resume":
+            if self.resume_error is not None:
+                self._pending.append({"id": message["id"], "error": self.resume_error})
+                return
+            self._pending.append(
+                {
+                    "id": message["id"],
+                    "result": {
+                        "thread": {"id": message["params"]["threadId"]},
+                        "model": self.model,
+                    },
+                }
             )
         elif method == "turn/start":
             self._pending.append({"id": message["id"], "result": {"turn": {"id": TURN}}})
@@ -137,7 +153,7 @@ def test_codex_thread_registers_only_tick_and_runs_read_only_without_approvals()
     }
     assert params["sandbox"] == "read-only"
     assert params["approvalPolicy"] == "never"
-    assert params["ephemeral"] is True
+    assert params["ephemeral"] is False, "chat threads persist so the next turn resumes them"
     assert params["model"] == "provider-model"
     assert params["developerInstructions"] == "structural frame"
     assert [m.get("method") for m in fake.sent[:3]] == ["initialize", "initialized", "thread/start"]
@@ -152,8 +168,48 @@ def test_codex_thread_registers_only_tick_and_runs_read_only_without_approvals()
             "result": {"ok": True, "evidence": ["checked"]},
             "evidence": ["checked"],
         },
-        {"kind": "done", "model": "provider-model", "usage": {"output_tokens": 422}},
+        {
+            "kind": "done",
+            "model": "provider-model",
+            "usage": {"output_tokens": 422},
+            "codex_thread_id": THREAD,
+        },
     )
+    (turn,) = fake.requests("turn/start")
+    assert json.loads(turn["input"][0]["text"]) == {"transcript": []}, (
+        "the frame travels as developer instructions, the input carries conversation only"
+    )
+
+
+def test_a_recorded_thread_is_resumed_with_only_the_unread_turns():
+    fake = FakeAppServer(turn_events=COMPLETED_TURN)
+    unread = ({"kind": "user", "text": "and then?"},)
+
+    chunks = tuple(
+        client(fake).turn(unread, "frame", setup_session_id="s1", model="m", thread_id="old-thread")
+    )
+
+    assert fake.requests("thread/start") == []
+    (resume,) = fake.requests("thread/resume")
+    assert resume["threadId"] == "old-thread"
+    assert resume["developerInstructions"] == "frame"
+    assert resume["config"]["mcp_servers"]["tick"]["args"] == ["mcp", "--setup-session", "s1"]
+    (turn,) = fake.requests("turn/start")
+    assert turn["threadId"] == "old-thread"
+    assert json.loads(turn["input"][0]["text"]) == {"transcript": list(unread)}
+    assert chunks[-1]["codex_thread_id"] == "old-thread"
+
+
+def test_a_thread_codex_no_longer_holds_raises_thread_lost_before_any_turn():
+    from tick.agents import ThreadLost
+
+    fake = FakeAppServer(resume_error={"code": -32000, "message": "thread not found"})
+
+    with pytest.raises(ThreadLost, match="thread not found"):
+        tuple(client(fake).turn((), "frame", setup_session_id=None, model="m", thread_id="gone"))
+
+    assert fake.requests("turn/start") == []
+    assert fake.closed
 
 
 def test_codex_setup_thread_scopes_the_box_server_to_the_session():

@@ -30,7 +30,7 @@ def test_chat_receives_the_same_complete_mapping_language_as_one_shot(tmp_path):
     setup = session(tmp_path)
     frames = []
 
-    def adapter(_transcript, frame):
+    def adapter(_transcript, frame, _thread=None):
         frames.append(frame)
         return ({"kind": "done"},)
 

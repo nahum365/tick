@@ -47,6 +47,7 @@ from .errors import (
     ModelAgentError,
     ModelReplyError,
     ProviderUnavailable,
+    ThreadLost,
 )
 from .model_agent import (
     MAX_OUTPUT_TOKENS,
@@ -113,6 +114,7 @@ __all__ = [
     "ProviderInfo",
     "ProviderShape",
     "ProviderUnavailable",
+    "ThreadLost",
     "agent_spec_id",
     "availability",
     "build_snapshot",

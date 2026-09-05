@@ -11,7 +11,7 @@ from typing import Any, Literal
 from tick.agents.errors import ModelReplyError, ProviderUnavailable
 from tick.broker.profile_model import proposal_instructions
 
-from .session import ChatError, compact_document_frame
+from .session import ChatError, compact_document_frame, continue_thread, record_thread
 from .setup import SETUP_FRAMES, SetupChatSession
 
 __all__ = ["MAX_SETUP_MODEL_TURNS", "SetupLoopDecision", "run_setup_loop"]
@@ -43,7 +43,7 @@ class SetupLoopDecision:
 
 
 SetupAdapter = Callable[
-    [tuple[Mapping[str, Any], ...], str],
+    [tuple[Mapping[str, Any], ...], str, str | None],
     Iterable[Mapping[str, Any]],
 ]
 SetupEvaluator = Callable[[], SetupLoopDecision]
@@ -65,7 +65,10 @@ def run_setup_loop(
     def append(chunk: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(chunk)
         kind = str(value.pop("kind"))
+        thread_id = value.pop("codex_thread_id", None) if kind == "done" else None
         setup.chat.append(kind, value, at=now())
+        if isinstance(thread_id, str) and thread_id:
+            record_thread(setup.chat, {"codex_thread_id": thread_id})
         if kind == "document":
             return compact_document_frame(value)
         return {"kind": kind, **value}
@@ -80,8 +83,8 @@ def run_setup_loop(
         )
         terminal = False
         try:
-            provider_chunks = adapter(
-                setup.chat.turns_for_replay(),
+            provider_chunks = continue_thread(
+                setup.chat,
                 SETUP_FRAMES[setup.state.scope]
                 + (
                     "\nBroker mapping instructions:\n"
@@ -110,6 +113,7 @@ def run_setup_loop(
                     if setup.state.goal == "simulation"
                     else ""
                 ),
+                adapter,
             )
             for raw in provider_chunks:
                 kind = raw.get("kind")

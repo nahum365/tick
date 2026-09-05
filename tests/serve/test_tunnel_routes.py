@@ -36,8 +36,10 @@ def context(home, metadata: Metadata) -> ServeContext:
             "model": model or "fixture-model",
             "codex_cli_version": "0.149.0",
         },
-        chat_adapter=lambda _provider, _model, _transcript, _frame: (),
-        setup_chat_adapter=lambda _provider, _model, _transcript, _frame, _session: (),
+        chat_adapter=lambda _provider, _model, _transcript, _frame, _thread=None: (),
+        setup_chat_adapter=(
+            lambda _provider, _model, _transcript, _frame, _session, _thread=None: ()
+        ),
         provider_login_start=lambda: {},
         provider_browser_login_start=lambda _viewport: {},
         provider_login_status=lambda _login: {},

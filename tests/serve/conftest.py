@@ -128,11 +128,11 @@ def server_box(box_home: Path):
             "model": model or "fixture-model",
             "codex_cli_version": "0.149.0",
         },
-        chat_adapter=lambda _provider, _model, _transcript, _frame: (
+        chat_adapter=lambda _provider, _model, _transcript, _frame, _thread=None: (
             {"kind": "text", "text": "fixture reply"},
             {"kind": "done", "model": "fixture-model"},
         ),
-        setup_chat_adapter=lambda _provider, _model, _transcript, _frame, _session: (
+        setup_chat_adapter=lambda _provider, _model, _transcript, _frame, _session, _thread=None: (
             {"kind": "text", "text": "fixture setup reply"},
             {"kind": "done", "model": "fixture-model"},
         ),

@@ -142,7 +142,7 @@ def test_broker_setup_repairs_proof_failure_without_another_person_turn(tmp_path
 
         calls = 0
 
-        def turn(self, _provider, _model, transcript, _frame, session_id):
+        def turn(self, _provider, _model, transcript, _frame, session_id, _thread=None):
             self.calls += 1
             box = BoxTools(context, setup_session_id=session_id)
             text = str(
@@ -245,7 +245,7 @@ def test_setup_loop_stops_at_the_model_turn_bound_with_an_actionable_sentence(tm
     )
     calls = 0
 
-    def adapter(_provider, _model, _transcript, _frame, _session_id):
+    def adapter(_provider, _model, _transcript, _frame, _session_id, _thread=None):
         nonlocal calls
         calls += 1
         return ({"kind": "text", "text": "I am still reading the inventory."},)
@@ -338,7 +338,7 @@ def test_setup_loop_parks_for_a_probe_value_and_resumes_from_the_answer(tmp_path
 
     calls = 0
 
-    def adapter(_provider, _model, transcript, _frame, session_id):
+    def adapter(_provider, _model, transcript, _frame, session_id, _thread=None):
         nonlocal calls
         calls += 1
         box = BoxTools(context, setup_session_id=session_id)

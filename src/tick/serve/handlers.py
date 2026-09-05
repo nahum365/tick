@@ -260,12 +260,12 @@ class ServeContext:
     tunnel_status: Callable[[], tuple[bool, str]]
     unit_fragments: Callable[[], tuple[bool, str, Sequence[str]]]
     chat_adapter: Callable[
-        [Provider, str | None, tuple[Mapping[str, Any], ...], str],
+        [Provider, str | None, tuple[Mapping[str, Any], ...], str, str | None],
         Iterable[Mapping[str, Any]],
     ]
     codex_chat_identity: Callable[[str | None], Mapping[str, str]]
     setup_chat_adapter: Callable[
-        [Provider, str | None, tuple[Mapping[str, Any], ...], str, str],
+        [Provider, str | None, tuple[Mapping[str, Any], ...], str, str, str | None],
         Iterable[Mapping[str, Any]],
     ]
     provider_login_start: Callable[[], Mapping[str, str]]
@@ -431,6 +431,7 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         model: str | None,
         transcript: tuple[Mapping[str, Any], ...],
         frame: str,
+        thread_id: str | None = None,
     ) -> Iterable[Mapping[str, Any]]:
         wire = tuple(dict(turn) for turn in transcript)
         if provider is Provider.CODEX:
@@ -443,7 +444,7 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
                     "CHAT_MODEL_REQUIRED",
                     "this Codex chat has no pinned model. Create a new chat and try again.",
                 )
-            return client.turn(wire, frame, setup_session_id=None, model=model)
+            return client.turn(wire, frame, setup_session_id=None, model=model, thread_id=thread_id)
         if model is None:
             raise ChatError(
                 "CHAT_MODEL_REQUIRED",
@@ -470,6 +471,7 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         transcript: tuple[Mapping[str, Any], ...],
         frame: str,
         session_id: str,
+        thread_id: str | None = None,
     ) -> Iterable[Mapping[str, Any]]:
         wire = tuple(dict(turn) for turn in transcript)
         if provider is Provider.CODEX:
@@ -483,7 +485,9 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
                     "this Codex setup chat has no pinned model. Start a new setup chat and try "
                     "again.",
                 )
-            return client.turn(wire, frame, setup_session_id=session_id, model=model)
+            return client.turn(
+                wire, frame, setup_session_id=session_id, model=model, thread_id=thread_id
+            )
         if model is None:
             raise ChatError(
                 "CHAT_MODEL_REQUIRED",
@@ -811,8 +815,8 @@ def chat_turn(
             session,
             str(body["text"]),
             at=_aware(context.now()),
-            adapter=lambda transcript, frame: context.chat_adapter(
-                provider, model, transcript, frame
+            adapter=lambda transcript, frame, thread_id: context.chat_adapter(
+                provider, model, transcript, frame, thread_id
             ),
         )
     except (ModelReplyError, ProviderUnavailable) as exc:
@@ -1044,12 +1048,13 @@ def _run_setup_loop(context: ServeContext, setup: SetupChatSession) -> Iterable[
     return run_setup_loop(
         setup,
         now=lambda: _aware(context.now()),
-        adapter=lambda transcript, frame: context.setup_chat_adapter(
+        adapter=lambda transcript, frame, thread_id: context.setup_chat_adapter(
             provider,
             model,
             transcript,
             frame,
             setup.chat.session_id,
+            thread_id,
         ),
         evaluate=lambda: _evaluate_setup(context, setup),
     )

@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
 from tick.agents import Provider
-from tick.agents.errors import ModelReplyError, ProviderUnavailable
+from tick.agents.errors import ModelReplyError, ProviderUnavailable, ThreadLost
 from tick.records import ensure_private_dir, write_private_file
 from tick.spec import canonical_encode, sha256_hex
 
@@ -226,15 +226,42 @@ class ChatSession:
                 "Delete this chat or inspect it on the box.",
             ) from exc
 
-    def turns_for_replay(self) -> tuple[Mapping[str, Any], ...]:
+    @property
+    def provider_thread(self) -> ProviderThread | None:
+        """The provider-side conversation this chat continues, if one was recorded."""
+        value = self.metadata.get("provider_thread")
+        if not isinstance(value, dict):
+            return None
+        thread_id = value.get("id")
+        seen = value.get("seen_seq")
+        if not isinstance(thread_id, str) or not isinstance(seen, int):
+            return None
+        return ProviderThread(id=thread_id, seen_seq=seen)
+
+    def set_provider_thread(self, thread: ProviderThread | None) -> None:
+        """Record (or forget) the provider thread and how far it has read this transcript."""
+        metadata = self.metadata
+        if thread is None:
+            metadata.pop("provider_thread", None)
+        else:
+            metadata["provider_thread"] = {"id": thread.id, "seen_seq": thread.seen_seq}
+        write_private_file(self.metadata_path, json.dumps(metadata, sort_keys=True) + "\n")
+
+    def last_seq(self) -> int:
+        turns = self.turns()
+        return turns[-1].seq if turns else 0
+
+    def turns_for_replay(self, *, after_seq: int = 0) -> tuple[Mapping[str, Any], ...]:
         """Bound provider context while the private transcript keeps exact bodies.
 
-        Tool evidence is recoverable through the named box tool, so replay retains
-        hashes and decision-bearing summaries instead of repeatedly sending contracts.
-        Person and model prose is never discarded; the latest document summary is also
+        A continued provider thread receives only the turns after ``after_seq``; a
+        fresh thread receives the whole compact transcript. Tool evidence is
+        recoverable through the named box tool, so replay retains hashes and
+        decision-bearing summaries instead of repeatedly sending contracts. Person
+        and model prose is never discarded; the latest document summary is also
         permanent because it tells the provider what the box currently holds.
         """
-        replay = [_compact_turn(turn) for turn in self.turns()]
+        replay = [_compact_turn(turn) for turn in self.turns() if turn.seq > after_seq]
         latest_document = next(
             (
                 index
@@ -306,7 +333,51 @@ class ChatSession:
             ) from exc
 
 
-TurnAdapter = Callable[[tuple[Mapping[str, Any], ...], str], Iterable[Mapping[str, Any]]]
+class ProviderThread(BaseModel):
+    """Where the provider's own conversation stands relative to Tick's transcript."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    seen_seq: int
+
+
+#: (replay, frame, provider thread id or None) -> chunks. Adapters that keep a
+#: provider-side thread yield ``codex_thread_id`` on their ``done`` chunk.
+TurnAdapter = Callable[
+    [tuple[Mapping[str, Any], ...], str, str | None], Iterable[Mapping[str, Any]]
+]
+
+
+def continue_thread(
+    session: ChatSession,
+    frame: str,
+    adapter: TurnAdapter,
+) -> Iterable[Mapping[str, Any]]:
+    """Run one provider turn on the recorded thread, or seed a new one if it is lost.
+
+    The provider sees only what it has not read yet; Tick's transcript remains the
+    complete record either way.
+    """
+    thread = session.provider_thread
+    if thread is not None:
+        try:
+            yield from adapter(
+                session.turns_for_replay(after_seq=thread.seen_seq), frame, thread.id
+            )
+            return
+        except ThreadLost:
+            session.set_provider_thread(None)
+    yield from adapter(session.turns_for_replay(), frame, None)
+
+
+def record_thread(session: ChatSession, done: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist the provider thread named on a ``done`` chunk; return the chunk to record."""
+    chunk = dict(done)
+    thread_id = chunk.pop("codex_thread_id", None)
+    if isinstance(thread_id, str) and thread_id:
+        session.set_provider_thread(ProviderThread(id=thread_id, seen_seq=session.last_seq()))
+    return chunk
 
 
 def stream_turn(
@@ -320,7 +391,7 @@ def stream_turn(
     if not text.strip():
         raise ChatError("CHAT_TURN_EMPTY", "write a message, then send the turn again.")
     session.append("user", {"text": text}, at=at)
-    provider_chunks = adapter(session.turns_for_replay(), CHAT_FRAME)
+    provider_chunks = continue_thread(session, CHAT_FRAME, adapter)
 
     def generate() -> Iterable[dict[str, Any]]:
         terminal = False
@@ -350,11 +421,14 @@ def stream_turn(
                         "retry it.",
                     )
                 chunk = dict(raw)
+                thread_id = chunk.pop("codex_thread_id", None) if kind == "done" else None
                 session.append(
                     str(kind),
                     {key: value for key, value in chunk.items() if key != "kind"},
                     at=at,
                 )
+                if isinstance(thread_id, str) and thread_id:
+                    record_thread(session, {"codex_thread_id": thread_id})
                 terminal = kind in {"done", "error"}
                 yield chunk
         except (ModelReplyError, ProviderUnavailable) as exc:

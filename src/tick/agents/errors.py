@@ -19,6 +19,7 @@ __all__ = [
     "ModelAgentError",
     "ModelReplyError",
     "ProviderUnavailable",
+    "ThreadLost",
 ]
 
 
@@ -33,6 +34,14 @@ class ModelReplyError(ModelAgentError):
     a reply that does not say which model produced it. Nothing is parsed,
     nothing is placed, and the tick stops — a decision record that cannot name
     the model that made the decision is not a record.
+    """
+
+
+class ThreadLost(ModelAgentError):
+    """The provider no longer holds the conversation thread Tick recorded.
+
+    The caller seeds a fresh thread from Tick's own transcript and continues;
+    nothing is placed, nothing is asked twice.
     """
 
 
