@@ -87,9 +87,13 @@ def test_cli_callback_keeps_the_two_installed_codex_executables_on_path(
     monkeypatch.setenv("TICK_HOME", str(home))
     monkeypatch.setenv("PATH", "/usr/bin")
 
-    cli._prepend_home_bin()
+    monkeypatch.setenv("CODEX_HOME", "/somebody/elses/.codex")
+
+    cli._prepare_codex_environment()
 
     assert cli.os.environ["PATH"].split(cli.os.pathsep)[0] == str(home / "bin")
+    assert cli.os.environ["CODEX_HOME"] == str(home / "codex")
+    assert not home.exists(), "the callback never creates TICK_HOME"
 
 
 def test_the_market_option_says_tick_ships_no_market_data():

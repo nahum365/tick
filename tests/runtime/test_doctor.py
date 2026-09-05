@@ -59,7 +59,7 @@ def test_doctor_command_prints_refusals_and_exits_nonzero_on_a_fresh_home(tick_h
     monkeypatch.setattr(
         doctor_observations,
         "codex_login_status",
-        lambda: (False, "run `codex login`, then retry."),
+        lambda _home=None: (False, "run `codex login`, then retry."),
     )
     monkeypatch.setattr(
         doctor_observations,

@@ -113,6 +113,10 @@ def run_setup_loop(
             )
             for raw in provider_chunks:
                 kind = raw.get("kind")
+                if kind == "text_delta":
+                    # Streamed prose is shown, not recorded; the completed text is.
+                    yield dict(raw)
+                    continue
                 if kind not in _PROVIDER_KINDS:
                     raise ChatError(
                         "CHAT_STREAM_INVALID",

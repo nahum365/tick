@@ -13,8 +13,12 @@ from tick.serve.pairing import PairingError, load_secret
 __all__ = ["codex_login_status", "loopback_status", "systemd_unit_fragments"]
 
 
-def codex_login_status() -> tuple[bool, str]:
-    """Require both release executables, then ask the CLI about its login."""
+def codex_login_status(home: Path | None = None) -> tuple[bool, str]:
+    """Require both release executables, then ask the CLI about its login.
+
+    The CLI answers for Tick's own Codex home (``CODEX_HOME`` is set for every
+    Tick process); the fallback file check looks there too, never in ``~/.codex``.
+    """
     executable = shutil.which("codex")
     if executable is None:
         return (
@@ -44,13 +48,15 @@ def codex_login_status() -> tuple[bool, str]:
         if result.returncode == 0:
             return True, sentence or "codex reports a logged-in session."
         return False, (sentence or "codex reports no login") + ". Run `codex login`."
-    auth = Path.home() / ".codex" / "auth.json"
+    from .codex_home import codex_home
+
+    auth = codex_home(home if home is not None else Path.home() / ".tick") / "auth.json"
     if auth.exists():
         return (
             True,
-            "codex is installed; ~/.codex/auth.json is present (its contents were not read).",
+            "codex is installed; Tick's Codex login file is present (its contents were not read).",
         )
-    return False, "codex is installed but ~/.codex/auth.json is absent; run `codex login`."
+    return False, "codex is installed but Tick has no Codex login; connect Codex from the app."
 
 
 def loopback_status(home: Path, port: int) -> tuple[bool, str]:

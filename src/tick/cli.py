@@ -297,16 +297,21 @@ pair_app = typer.Typer(
 
 
 @app.callback()
-def _prepend_home_bin() -> None:
-    """Make `TICK_HOME/bin` (where `tick provider install codex` places the CLI) visible.
+def _prepare_codex_environment() -> None:
+    """Point every Codex process at Tick's own bin and Codex home.
 
-    Every `shutil.which("codex")` in the runtime then finds a box-installed Codex,
-    including under systemd, whose PATH omits the user's own bin directories.
+    `TICK_HOME/bin` (where `tick provider install codex` places the CLI) leads
+    PATH so `shutil.which("codex")` finds the box-installed Codex, including under
+    systemd. `CODEX_HOME` is Tick's private directory, so the person's own Codex
+    configuration never loads into an agent and Tick never touches it.
     """
-    home_bin = _home() / "bin"
-    current = os.environ.get("PATH", "")
-    if str(home_bin) not in current.split(os.pathsep):
-        os.environ["PATH"] = f"{home_bin}{os.pathsep}{current}" if current else str(home_bin)
+    from tick.serve.codex_home import codex_environment, ensure_codex_home
+
+    home = _home()
+    if home.is_dir():
+        # Never create TICK_HOME from a callback; a refused command leaves no trace.
+        ensure_codex_home(home)
+    os.environ.update(codex_environment(os.environ, home))
 
 
 app.add_typer(provider_app, name="provider")
@@ -2038,7 +2043,7 @@ def doctor(
     report = run_doctor(
         home,
         now=datetime.now(UTC),
-        provider_status=codex_login_status,
+        provider_status=lambda: codex_login_status(home),
         loopback_status=lambda: loopback_status(home, port),
         tunnel_status=lambda: tunnel_status(home),
         unit_fragments=systemd_unit_fragments,
@@ -2060,7 +2065,7 @@ def doctor(
         report = run_doctor(
             home,
             now=datetime.now(UTC),
-            provider_status=codex_login_status,
+            provider_status=lambda: codex_login_status(home),
             loopback_status=lambda: loopback_status(home, port),
             tunnel_status=lambda: tunnel_status(home),
             unit_fragments=systemd_unit_fragments,

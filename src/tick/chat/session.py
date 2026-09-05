@@ -327,6 +327,11 @@ def stream_turn(
         try:
             for raw in provider_chunks:
                 kind = raw.get("kind")
+                if kind == "text_delta":
+                    # Streamed prose fragments reach the phone as they arrive; the
+                    # completed message is the one the transcript records.
+                    yield dict(raw)
+                    continue
                 if kind not in {
                     "text",
                     "tool_call",

@@ -284,6 +284,9 @@ class ServeContext:
 
 def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
     """Production dependencies; tests construct ``ServeContext`` with inert fakes."""
+    from .codex_home import ensure_codex_home
+
+    ensure_codex_home(home)
 
     def alive(pid: int) -> bool:
         try:
@@ -518,7 +521,7 @@ def default_context(home: Path, env: Mapping[str, str]) -> ServeContext:
         pid_alive=alive,
         start_process=start,
         signal_process=send,
-        provider_status=codex_login_status,
+        provider_status=lambda: codex_login_status(home),
         loopback_status=lambda: loopback_status(home, port),
         tunnel_status=lambda: tunnel_status(home),
         unit_fragments=systemd_unit_fragments,

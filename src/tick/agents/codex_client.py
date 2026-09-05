@@ -53,6 +53,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from tick import __version__
+
 from .client import ModelClient, ModelReply, ModelRequest, StructuredReply, intents_of
 from .errors import ModelReplyError, ProviderUnavailable
 
@@ -216,8 +218,167 @@ class CodexModelClient:
         return StructuredReply(model=model, tool_name=tool_name, payload=payload)
 
 
+class AppServerTransport(Protocol):
+    """One JSON-RPC connection to a `codex app-server` process over stdio."""
+
+    def send(self, message: Mapping[str, Any]) -> None: ...
+
+    def receive(self, timeout: float) -> dict[str, Any] | None:
+        """The next message, or None once the process has closed its output."""
+        ...
+
+    def close(self) -> None: ...
+
+
+class _StdioAppServer:
+    """A real app-server child; a reader thread keeps stdout draining."""
+
+    def __init__(self, argv: Sequence[str]) -> None:
+        self._process = subprocess.Popen(  # noqa: S603 - argv is built here from constants
+            list(argv),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        assert self._process.stdout is not None
+        for line in self._process.stdout:
+            self._lines.put(line)
+        self._lines.put(None)
+
+    def send(self, message: Mapping[str, Any]) -> None:
+        assert self._process.stdin is not None
+        self._process.stdin.write(json.dumps(message) + "\n")
+        self._process.stdin.flush()
+
+    def receive(self, timeout: float) -> dict[str, Any] | None:
+        try:
+            line = self._lines.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError from exc
+        if line is None:
+            return None
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ModelReplyError(
+                f"codex app-server emitted an unreadable line ({exc.msg}). The chat turn "
+                "stopped; retry it."
+            ) from exc
+        if not isinstance(value, dict):
+            raise ModelReplyError(
+                "codex app-server emitted a non-object message. The chat turn stopped; retry it."
+            )
+        return value
+
+    def stderr_tail(self) -> str:
+        if self._process.stderr is None:
+            return ""
+        try:
+            return _tail(self._process.stderr.read())
+        except (OSError, ValueError):
+            return ""
+
+    def close(self) -> None:
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait()
+        for stream in (self._process.stdin, self._process.stdout, self._process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+TransportFactory = Callable[[Sequence[str]], AppServerTransport]
+
+#: Server-to-client requests Tick answers with a refusal: approvals, elicitations,
+#: dynamic tool calls, token refreshes. A Tick chat grants nothing interactively.
+_REFUSAL = {"code": -32601, "message": "Tick refuses interactive requests"}
+
+
+class CodexAppServer:
+    """Drive one app-server conversation: initialize, one thread, streamed turns.
+
+    The connection lives for one Tick turn. Server requests are refused, every
+    notification is handed to the caller in arrival order, and the response to
+    each request is matched by id.
+    """
+
+    def __init__(self, transport: AppServerTransport, *, timeout_seconds: float) -> None:
+        self._transport = transport
+        self._deadline = time.monotonic() + timeout_seconds
+        self._sequence = 0
+        self.notifications: list[dict[str, Any]] = []
+
+    def _remaining(self) -> float:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        return remaining
+
+    def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Send one request and return its result; notifications are collected meanwhile."""
+        self._sequence += 1
+        expected = self._sequence
+        self._transport.send({"id": expected, "method": method, "params": dict(params)})
+        while True:
+            message = self._transport.receive(self._remaining())
+            if message is None:
+                raise ModelReplyError(
+                    f"codex app-server closed before answering {method}. The chat turn "
+                    "stopped; retry after checking the provider login."
+                )
+            if message.get("id") == expected and "method" not in message:
+                if "error" in message:
+                    detail = _error_message(message.get("error")) or "no detail"
+                    raise ModelReplyError(
+                        f"codex app-server refused {method}: {detail}. The chat turn stopped; "
+                        "retry after correcting the provider login or model."
+                    )
+                result = message.get("result")
+                return result if isinstance(result, dict) else {}
+            self._handle(message)
+
+    def notify(self, method: str) -> None:
+        self._transport.send({"method": method})
+
+    def events(self) -> Iterable[dict[str, Any]]:
+        """Yield notifications until the turn completes; refuse server requests."""
+        while True:
+            message = self._transport.receive(self._remaining())
+            if message is None:
+                raise ModelReplyError(
+                    "codex app-server closed before the turn completed. The chat turn stopped; "
+                    "retry it."
+                )
+            if self._handle(message):
+                yield message
+                if message.get("method") == "turn/completed":
+                    return
+
+    def _handle(self, message: dict[str, Any]) -> bool:
+        method = message.get("method")
+        if method is None:
+            return False
+        if "id" in message:
+            self._transport.send({"id": message["id"], "error": dict(_REFUSAL)})
+            return False
+        self.notifications.append(message)
+        return True
+
+    def close(self) -> None:
+        self._transport.close()
+
+
 class CodexChatClient:
-    """Run one isolated Codex process per chat turn with only Tick's box MCP."""
+    """Stream one Codex app-server turn per chat message, with only Tick's box MCP."""
 
     def __init__(
         self,
@@ -226,24 +387,21 @@ class CodexChatClient:
         binary: str,
         tick_command: str,
         timeout_seconds: float,
+        transport: TransportFactory | None = None,
     ) -> None:
         self._run = run
         self._binary = binary
         self._tick_command = tick_command
         self._timeout = timeout_seconds
+        self._transport = transport or _StdioAppServer
 
     @classmethod
     def for_environment(cls, *, tick_command: str) -> CodexChatClient:
         resolved = shutil.which(CODEX_BINARY)
         if resolved is None:
             raise ProviderUnavailable(
-                "no `codex` command is installed. Install it and run `codex login`; "
+                "no `codex` command is installed. Install it and connect Codex from the app; "
                 "the chat remains on this box."
-            )
-        if shutil.which("codex-code-mode-host") is None:
-            raise ProviderUnavailable(
-                "no `codex-code-mode-host` command is installed. Run `tick provider install "
-                "codex`, then create the chat again."
             )
         return cls(
             run=_real_runner,
@@ -252,94 +410,110 @@ class CodexChatClient:
             timeout_seconds=CODEX_TIMEOUT_SECONDS,
         )
 
-    def identify(self, requested_model: str | None) -> CodexChatIdentity:
-        """Resolve the chat model once; a person's explicit choice needs no probe."""
-        chosen = requested_model.strip() if requested_model is not None else None
-        if chosen:
-            result = self._checked_run(
-                [self._binary, "--version"],
-                "",
-                purpose="report its installed version",
-            )
-            version = _codex_version_named_in(result.stdout, result.stderr)
-            if version is None:
-                raise ProviderUnavailable(
-                    "codex did not report its CLI version. Reinstall or update the Codex CLI, "
-                    "then create the chat again."
-                )
-            return CodexChatIdentity(model=chosen, cli_version=version)
+    def app_server_argv(self) -> list[str]:
+        """The one process this client starts; `CODEX_HOME` comes from Tick's environment."""
+        return [self._binary, "app-server", "--listen", "stdio://"]
 
-        with tempfile.TemporaryDirectory(prefix="tick-chat-probe-") as tmp:
-            workdir = Path(tmp) / "cwd"
-            workdir.mkdir(mode=0o700)
-            result = self._checked_run(
-                self.probe_argv(workdir=workdir),
-                "Reply with ready.",
-                purpose="name the effective chat model",
-            )
-        model = _model_named_in(result.stderr)
-        version = _codex_version_named_in(result.stdout, result.stderr)
-        if model is None:
-            raise ProviderUnavailable(
-                "codex's probe header did not name the effective model. Reinstall or update "
-                "the Codex CLI, or name a model when creating the chat."
-            )
-        if version is None:
-            raise ProviderUnavailable(
-                "codex's probe header did not name its CLI version. Reinstall or update the "
-                "Codex CLI, then create the chat again."
-            )
-        return CodexChatIdentity(model=model, cli_version=version)
-
-    def probe_argv(self, *, workdir: Path) -> list[str]:
-        """Run without JSON once so the CLI's own header can name its effective model."""
-        return [
-            self._binary,
-            "exec",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "-s",
-            "read-only",
-            "-C",
-            str(workdir),
-            "-",
-        ]
-
-    def argv(
+    def thread_params(
         self,
         *,
         workdir: Path,
         setup_session_id: str | None,
-        model: str,
-    ) -> list[str]:
-        """Expose the complete isolation boundary for a direct invariant test."""
+        model: str | None,
+        frame: str | None,
+    ) -> dict[str, Any]:
+        """The complete isolation boundary of a Tick thread, exposed for a direct test."""
         mcp_args = ["mcp"]
         if setup_session_id is not None:
             mcp_args.extend(("--setup-session", setup_session_id))
-        return [
-            self._binary,
-            "exec",
-            "--json",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "-s",
-            "read-only",
-            "-c",
-            'mcp_servers.tick.default_tools_approval_mode="approve"',
-            "-C",
-            str(workdir),
-            "-m",
-            model,
-            "-c",
-            f"mcp_servers.tick.command={json.dumps(self._tick_command)}",
-            "-c",
-            f"mcp_servers.tick.args={json.dumps(mcp_args, separators=(',', ':'))}",
-            "-",
-        ]
+        params: dict[str, Any] = {
+            "cwd": str(workdir),
+            "ephemeral": True,
+            "sandbox": "read-only",
+            "approvalPolicy": "never",
+            "config": {
+                "mcp_servers": {
+                    "tick": {
+                        "command": self._tick_command,
+                        "args": mcp_args,
+                        "default_tools_approval_mode": "approve",
+                    }
+                }
+            },
+        }
+        if model is not None:
+            params["model"] = model
+        if frame is not None:
+            params["developerInstructions"] = frame
+        return params
+
+    def _open(
+        self, *, workdir: Path, setup_session_id: str | None, model: str | None, frame: str | None
+    ) -> tuple[CodexAppServer, str, str]:
+        server = CodexAppServer(
+            self._transport(self.app_server_argv()), timeout_seconds=self._timeout
+        )
+        try:
+            server.request(
+                "initialize",
+                {"clientInfo": {"name": "tick", "title": "Tick", "version": __version__}},
+            )
+            server.notify("initialized")
+            started = server.request(
+                "thread/start",
+                self.thread_params(
+                    workdir=workdir, setup_session_id=setup_session_id, model=model, frame=frame
+                ),
+            )
+        except BaseException:
+            server.close()
+            raise
+        thread = started.get("thread") if isinstance(started.get("thread"), dict) else {}
+        thread_id = thread.get("id")
+        effective = started.get("model")
+        if not isinstance(thread_id, str) or not thread_id:
+            server.close()
+            raise ModelReplyError(
+                "codex app-server started a thread without an id. The chat turn stopped; retry it."
+            )
+        if not isinstance(effective, str) or not effective.strip():
+            server.close()
+            raise ProviderUnavailable(
+                "codex app-server did not name the thread's model. Choose a model in model "
+                "settings, then create the chat again."
+            )
+        return server, thread_id, effective
+
+    def identify(self, requested_model: str | None) -> CodexChatIdentity:
+        """Resolve the chat model once from the server itself, never from a header."""
+        result = self._checked_run(
+            [self._binary, "--version"], "", purpose="report its installed version"
+        )
+        version = _codex_version_named_in(result.stdout, result.stderr)
+        if version is None:
+            raise ProviderUnavailable(
+                "codex did not report its CLI version. Reinstall or update the Codex CLI, "
+                "then create the chat again."
+            )
+        chosen = requested_model.strip() if requested_model is not None else None
+        if chosen:
+            return CodexChatIdentity(model=chosen, cli_version=version)
+        with tempfile.TemporaryDirectory(prefix="tick-chat-probe-") as tmp:
+            workdir = Path(tmp) / "cwd"
+            workdir.mkdir(mode=0o700)
+            try:
+                server, _thread, effective = self._open(
+                    workdir=workdir, setup_session_id=None, model=None, frame=None
+                )
+            except TimeoutError as exc:
+                raise ProviderUnavailable(
+                    f"codex did not name the effective chat model within {self._timeout:.0f}s. "
+                    "Check the CLI login and create the chat again."
+                ) from exc
+            except ModelReplyError as exc:
+                raise ProviderUnavailable(str(exc)) from exc
+            server.close()
+        return CodexChatIdentity(model=effective, cli_version=version)
 
     def turn(
         self,
@@ -349,7 +523,7 @@ class CodexChatClient:
         setup_session_id: str | None,
         model: str,
     ) -> Iterable[dict[str, Any]]:
-        """Replay the private transcript and preserve prose versus tool evidence."""
+        """Replay the private transcript and stream prose, tool evidence and completion."""
         prompt = json.dumps(
             {"frame": frame, "transcript": list(transcript)},
             ensure_ascii=False,
@@ -359,43 +533,47 @@ class CodexChatClient:
             workdir = Path(tmp) / "cwd"
             workdir.mkdir(mode=0o700)
             try:
-                result = self._run(
-                    self.argv(
-                        workdir=workdir,
-                        setup_session_id=setup_session_id,
-                        model=model,
-                    ),
-                    prompt,
-                    self._timeout,
+                server, thread_id, effective = self._open(
+                    workdir=workdir, setup_session_id=setup_session_id, model=model, frame=frame
                 )
-            except subprocess.TimeoutExpired as exc:
+            except TimeoutError as exc:
+                raise ModelReplyError(
+                    f"codex app-server did not start a thread within {self._timeout:.0f}s. "
+                    "The chat turn stopped; send it again if you still want an answer."
+                ) from exc
+            try:
+                server.request(
+                    "turn/start",
+                    {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
+                )
+                usage: dict[str, Any] = {}
+                for event in server.events():
+                    method = event.get("method")
+                    params = event.get("params") if isinstance(event.get("params"), dict) else {}
+                    if method == "thread/tokenUsage/updated":
+                        reported = params.get("tokenUsage")
+                        usage = reported if isinstance(reported, dict) else usage
+                        continue
+                    if method == "turn/completed":
+                        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                        if turn.get("status") != "completed":
+                            detail = _error_message(turn.get("error")) or "no detail"
+                            raise ModelReplyError(
+                                f"codex turn {turn.get('status') or 'failed'}: {detail}. The "
+                                "chat turn stopped; retry after correcting the provider login."
+                            )
+                        break
+                    chunk = _app_server_chunk(method, params)
+                    if chunk is not None:
+                        yield chunk
+            except TimeoutError as exc:
                 raise ModelReplyError(
                     f"codex did not answer within {self._timeout:.0f}s. The chat turn stopped; "
                     "send it again if you still want an answer."
                 ) from exc
-        if result.returncode != 0:
-            raise ModelReplyError(
-                f"codex exited with status {result.returncode}: "
-                f"{_tail(result.stderr) or _tail(result.stdout) or 'no output'}. "
-                "The chat turn stopped; retry after correcting the provider login."
-            )
-        completed: dict[str, Any] | None = None
-        for line in result.stdout.splitlines():
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ModelReplyError(
-                    f"codex emitted unreadable JSONL ({exc.msg}). The chat turn stopped; retry it."
-                ) from exc
-            chunk = _chat_chunk(event)
-            if chunk is not None:
-                if chunk.get("kind") == "done":
-                    completed = chunk
-                else:
-                    yield chunk
-        yield {"kind": "done", "model": model, **(completed or {})}
+            finally:
+                server.close()
+        yield {"kind": "done", "model": effective, "usage": usage}
 
     def _checked_run(
         self,
@@ -420,43 +598,33 @@ class CodexChatClient:
         return result
 
 
-def _chat_chunk(event: Any) -> dict[str, Any] | None:
-    if not isinstance(event, dict):
-        return None
-    event_type = str(event.get("type", ""))
-    if event_type == "turn.completed":
-        usage = event.get("usage")
-        return {"kind": "done", "usage": usage if isinstance(usage, dict) else {}}
-    item = event.get("item") if isinstance(event.get("item"), dict) else event
-    item_type = str(item.get("type", event_type))
-
-    if event_type == "item.completed" and item_type in {"agent_message", "message", "text"}:
-        text = item.get("text") or item.get("message")
-        if not isinstance(text, str) or not text:
+def _app_server_chunk(method: str | None, params: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Map one app-server notification onto Tick's chat chunk vocabulary."""
+    if method == "item/agentMessage/delta":
+        delta = params.get("delta")
+        return {"kind": "text_delta", "text": delta} if isinstance(delta, str) and delta else None
+    if method == "error":
+        message = _error_message(params.get("error")) or _error_message(params.get("message"))
+        if message is None:
             return None
-        return {"kind": "text", "text": text}
-
-    if event_type == "item.completed" and item_type == "error":
-        message = _error_message(item.get("error") or item.get("message") or item.get("text"))
-        return {
-            "kind": "text",
-            "text": message or "the provider reported an error without a message.",
-            "source": "provider",
-        }
-
-    if item_type == "mcp_tool_call":
-        name = item.get("tool") or item.get("name") or item.get("tool_name")
-        arguments = item.get("arguments") or item.get("input") or {}
-        server = item.get("server")
-        if event_type == "item.started":
+        return {"kind": "text", "text": message, "source": "provider"}
+    if method not in {"item/started", "item/completed"}:
+        return None
+    item = params.get("item") if isinstance(params.get("item"), dict) else {}
+    item_type = item.get("type")
+    if method == "item/completed" and item_type == "agentMessage":
+        text = item.get("text")
+        return {"kind": "text", "text": text} if isinstance(text, str) and text else None
+    if item_type == "mcpToolCall":
+        name = item.get("tool")
+        arguments = item.get("arguments") if item.get("arguments") is not None else {}
+        if method == "item/started":
             return {
                 "kind": "tool_call",
                 "name": name,
-                "server": server,
+                "server": item.get("server"),
                 "arguments": arguments,
             }
-        if event_type != "item.completed":
-            return None
         if item.get("status") != "completed":
             return {
                 "kind": "tool_error",
@@ -470,24 +638,7 @@ def _chat_chunk(event: Any) -> dict[str, Any] | None:
         result = _decode_mcp_result(item.get("result"))
         if isinstance(result, dict) and result.get("executed") is False:
             return {"kind": "proposal", **result}
-        chunk = {"kind": "tool_result", "name": name, "result": result}
-        if isinstance(result, dict) and isinstance(result.get("evidence"), list):
-            chunk["evidence"] = result["evidence"]
-        return chunk
-
-    # Compatibility for the pre-0.149 fixture vocabulary retained by older transcripts.
-    text = item.get("text") or item.get("message")
-    if isinstance(text, str) and text and ("message" in item_type or "text" in item_type):
-        return {"kind": "text", "text": text}
-    if "tool" in item_type:
-        name = item.get("name") or item.get("tool_name")
-        arguments = item.get("arguments") or item.get("input") or {}
-        result = item.get("result") or item.get("output")
-        if result is None:
-            return {"kind": "tool_call", "name": name, "arguments": arguments}
-        if isinstance(result, dict) and result.get("executed") is False:
-            return {"kind": "proposal", **result}
-        chunk = {"kind": "tool_result", "name": name, "result": result}
+        chunk: dict[str, Any] = {"kind": "tool_result", "name": name, "result": result}
         if isinstance(result, dict) and isinstance(result.get("evidence"), list):
             chunk["evidence"] = result["evidence"]
         return chunk
