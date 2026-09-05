@@ -44,6 +44,7 @@ class Slot:
 
     name: str
     question: str
+    explains: str
     type: str
     schema: Mapping[str, Any]
     validator: Validator
@@ -158,6 +159,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "universe",
         "Which symbols are in the universe?",
+        "The list of symbols this agent may look at and trade. Orders for anything outside it "
+        "refuse before they reach the broker.",
         "symbol list",
         _schema(TypeAdapter(list[str])),
         _validate_universe,
@@ -166,6 +169,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "cadence",
         "What cadence will the agent use?",
+        "How often the runtime evaluates the rules on market days. Nothing happens between "
+        "evaluations.",
         "cadence",
         _schema(TypeAdapter(Cadence)),
         _validate_cadence,
@@ -174,6 +179,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "kind",
         "Is this a rule agent or a model-driven agent?",
+        "Rule agents run only the structured conditions written here. Model-driven agents run "
+        "your instructions through your connected model inside the same limits.",
         "agent kind",
         _schema(TypeAdapter(AgentKind)),
         _validate_kind,
@@ -182,6 +189,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "rules",
         "What are the structured conditions and actions for each rule?",
+        "Each rule is a condition the runtime checks and the action it takes when the condition "
+        "is true. The runtime evaluates them exactly as written.",
         "rule list",
         _schema(TypeAdapter(list[Rule])),
         _validate_rules,
@@ -190,6 +199,7 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "provider",
         "Which connected provider will this agent use?",
+        "The connected model provider that runs this agent's instructions on your server.",
         "provider",
         _schema(TypeAdapter(Provider)),
         _validate_provider,
@@ -198,6 +208,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "model",
         "Which model identifier will this agent use?",
+        "The exact model identifier from that provider. It is recorded with every decision the "
+        "agent makes.",
         "model identifier",
         _schema(TypeAdapter(str)),
         _validate_model,
@@ -206,6 +218,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "instructions",
         "What exact instructions will this model-driven agent run?",
+        "The text your model receives on every evaluation. It can only act within the limits "
+        "recorded here.",
         "instructions",
         _schema(TypeAdapter(str)),
         _validate_instructions,
@@ -214,6 +228,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "cage.max_position_pct",
         "What is the maximum position percentage?",
+        "The largest share of the account any single position may reach. The runtime refuses "
+        "orders that would exceed it, whatever the rules say.",
         "exact decimal",
         _DECIMAL_SCHEMA,
         _validate_percentage,
@@ -222,6 +238,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "cage.max_positions",
         "What is the maximum position count?",
+        "How many positions the agent may keep open at once. Further opening orders refuse until "
+        "one closes.",
         "integer",
         _INTEGER_SCHEMA,
         _validate_position_count,
@@ -230,6 +248,7 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "cage.max_order_notional",
         "What is the maximum order amount?",
+        "The largest amount a single order may be worth. Larger orders refuse.",
         "exact decimal",
         _DECIMAL_SCHEMA,
         _validate_order_amount,
@@ -238,6 +257,7 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "cage.max_daily_drawdown_pct",
         "What is the maximum daily drawdown percentage?",
+        "The loss within one day that stops the agent for the rest of that day.",
         "exact decimal",
         _DECIMAL_SCHEMA,
         _validate_percentage,
@@ -246,6 +266,7 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "cage.allowed_session",
         "Which session is allowed?",
+        "The part of the trading day during which the agent may place orders.",
         "session",
         _schema(TypeAdapter(Session)),
         _validate_session,
@@ -254,6 +275,8 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "approval",
         "Which approval mode will this agent use?",
+        "Whether you confirm each order before it is sent, or grant standing approval within "
+        "these limits. You choose this again when you adopt the agent.",
         "approval mode",
         _schema(TypeAdapter(ApprovalMode)),
         _validate_approval,

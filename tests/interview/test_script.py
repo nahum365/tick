@@ -24,9 +24,18 @@ def test_every_slot_has_no_default_and_a_validator():
 
 def test_questions_have_no_number_symbol_or_advice_vocabulary():
     for slot in SLOTS:
-        assert not re.search(r"\d", slot.question), slot.name
-        assert not SYMBOL_SHAPED.search(slot.question), slot.name
-        assert not ADVICE.search(slot.question), slot.name
+        for text in (slot.question, slot.explains):
+            assert not re.search(r"\d", text), slot.name
+            assert not SYMBOL_SHAPED.search(text), slot.name
+            assert not ADVICE.search(text), slot.name
+
+
+def test_every_slot_explains_what_it_controls_without_a_value():
+    """Guidance is structural: what the runtime does with the answer, never which answer."""
+    for slot in SLOTS:
+        assert len(slot.explains.split()) >= 8, slot.name
+        assert slot.explains.endswith("."), slot.name
+        assert "%" not in slot.explains and "$" not in slot.explains, slot.name
 
 
 def test_every_slot_schema_carries_no_default():

@@ -224,8 +224,16 @@ class BoxTools:
         self._require_scope(SetupScope.AGENT_DRAFT)
         return {
             "slots": [
-                {"name": slot.name, "question": slot.question, "type": slot.type} for slot in SLOTS
+                {
+                    "name": slot.name,
+                    "question": slot.question,
+                    "explains": slot.explains,
+                    "type": slot.type,
+                    "kinds": sorted(kind.value for kind in slot.kinds),
+                }
+                for slot in SLOTS
             ],
+            "order": "Ask in this order, one slot per message.",
             "evidence": ["checked"],
         }
 

@@ -38,11 +38,21 @@ SETUP_FRAMES = {
     ),
     SetupScope.AGENT_DRAFT: (
         "Interview the person until one complete agent draft exists. Use only this setup "
-        "session's agent-draft tools. Supply structure, never strategy content or a missing "
-        "value. Every meaning-bearing field needs user or model:<reported-id> provenance. "
-        "After a checked structural failure, fix and re-propose without waiting. When a value "
-        "must come from the person, ask once in one message that lists exactly what is missing "
-        "and why; suggest no value. A proposal creates no agent; only the person may adopt it."
+        "session's agent-draft tools: call interview_script and agent_draft before your first "
+        "question; the script is the complete list of fields, and no other field exists. "
+        "Ask exactly one field per message, in script order. Each message names the field in "
+        "plain words, repeats the script's explanation of what it controls, and offers one "
+        "concrete suggestion drawn from what the person has told you, marked as your "
+        "suggestion; the person may accept it, change it, or give their own value. A value "
+        "the person states carries user provenance; a suggestion the person accepts carries "
+        "model:<reported-id> provenance; never record a value the person has not confirmed. "
+        "Fields already settled by the conversation are not asked again: the agent kind from "
+        "the opening message, and for a model-driven agent the provider and model of this very "
+        "session. For approval, propose confirming each order and say the person chooses this "
+        "again at adoption. Supply structure, never strategy content. When every field is "
+        "settled, call propose_agent_draft with the whole document; after a checked structural "
+        "failure, fix and re-propose without waiting. A proposal creates no agent; only the "
+        "person may adopt it."
     ),
 }
 

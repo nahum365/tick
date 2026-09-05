@@ -66,7 +66,7 @@ from tick.commons import (
     load_key,
 )
 from tick.commons.models import ScreenCriterion
-from tick.interview import SLOTS, AgentKind, InterviewError, InterviewSession
+from tick.interview import AgentKind, InterviewError, InterviewSession
 from tick.records import (
     DataSource,
     Ledger,
@@ -963,7 +963,11 @@ def setup_chat_create(context: ServeContext, body: Mapping[str, Any]) -> tuple[i
                     "document; warnings will come back here for another turn."
                 )
         else:
-            opening = SLOTS[0].question
+            opening = (
+                "Say what you want this agent to do, in your own words. Your model will then "
+                "ask about one detail at a time, explain what each one controls, and offer a "
+                "suggestion you can accept or replace. You adopt the finished draft yourself."
+            )
         session.chat.append("text", {"text": opening, "source": "box"}, at=_aware(context.now()))
         if not resume and session.state.goal != "simulation":
             tuple(_run_setup_loop(context, session))
