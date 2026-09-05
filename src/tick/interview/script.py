@@ -257,7 +257,10 @@ SLOTS: tuple[Slot, ...] = (
     Slot(
         "cage.max_daily_drawdown_pct",
         "What is the maximum daily drawdown percentage?",
-        "The loss within one day that stops the agent for the rest of that day.",
+        "The loss within one day, measured against that day's opening equity, after "
+        "which the runtime places no new opening orders for the rest of the session. "
+        "The agent keeps evaluating on every tick, closing orders still go through, and "
+        "the limit resets with the next session.",
         "exact decimal",
         _DECIMAL_SCHEMA,
         _validate_percentage,
